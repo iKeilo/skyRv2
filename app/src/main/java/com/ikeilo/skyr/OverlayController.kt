@@ -31,6 +31,7 @@ class OverlayController(
 ) : PlaybackController.Listener {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val positionStore = PositionStore(context)
+    private val uiPrefs = context.getSharedPreferences("overlay_ui", Context.MODE_PRIVATE)
     private var controls: View? = null
     private var positionView: View? = null
     private var songPickerView: View? = null
@@ -43,30 +44,39 @@ class OverlayController(
     private val bundledSongs: List<String> by lazy { loadBundledSongs() }
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
+    private val uiScaleValues = listOf(0.85f, 1.0f, 1.15f, 1.3f, 1.5f)
+    private val uiSizeLabels = listOf("小", "中", "大", "特大", "超大")
+    private var uiSizeIndex = uiPrefs.getInt("uiSizeIndex", 1).coerceIn(uiScaleValues.indices)
+    private val uiScale: Float
+        get() = uiScaleValues[uiSizeIndex]
 
     init {
         PlaybackController.listener = this
         positionStore.load()?.let { PlaybackController.keyPoints = it.points }
     }
 
-    fun showControls() {
+    fun showControls(x: Int = 20, y: Int = 80) {
+        PlaybackController.listener = this
         if (!Settings.canDrawOverlays(context)) {
             Toast.makeText(context, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
             return
         }
-        if (controls != null) return
+        if (controls != null) {
+            syncPlaybackControls()
+            return
+        }
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.argb(110, 10, 14, 15), dp(6).toFloat())
-            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = rounded(Color.argb(110, 10, 14, 15), scaledDp(6).toFloat())
+            setPadding(scaledDp(4), scaledDp(4), scaledDp(4), scaledDp(4))
         }
         songLabel = TextView(context).apply {
             text = "乐谱: ${PlaybackController.song?.name ?: "未选择"}"
             setTextColor(Color.WHITE)
-            textSize = 11f
+            textSize = scaledText(11f)
             maxLines = 1
-            setPadding(dp(3), 0, dp(3), dp(3))
+            setPadding(scaledDp(3), 0, scaledDp(3), scaledDp(3))
         }
         val pick = button("选曲") { showSongPicker() }
         val play = button("开始") { PlaybackController.start() }
@@ -79,6 +89,7 @@ class OverlayController(
             PlaybackController.speed = speeds[speedIndex]
             (it as Button).text = "${PlaybackController.speed}x"
         }
+        val uiSize = button("UI ${uiSizeLabels[uiSizeIndex]}") { cycleUiSize() }
         positionButton = button("定位") {
             if (positionView == null) showPositionOverlay() else finishPosition()
         }
@@ -89,18 +100,19 @@ class OverlayController(
             removeControls()
         }
         root.addView(songLabel)
-        listOf(pick, play, pauseButton, end, speed, positionButton, exit).forEach { root.addView(it) }
+        listOf(pick, play, pauseButton, end, speed, uiSize, positionButton, exit).forEach { root.addView(it) }
         makeDraggable(root) { controlsParams }
 
         val params = baseParams().apply {
             width = WindowManager.LayoutParams.WRAP_CONTENT
             height = WindowManager.LayoutParams.WRAP_CONTENT
-            x = 20
-            y = 80
+            this.x = x
+            this.y = y
         }
         controlsParams = params
         windowManager.addView(root, params)
         controls = root
+        syncPlaybackControls()
     }
 
     private fun showSongPicker() {
@@ -118,9 +130,9 @@ class OverlayController(
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.argb(226, 18, 27, 28), dp(10).toFloat())
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            elevation = dp(8).toFloat()
+            background = rounded(Color.argb(226, 18, 27, 28), scaledDp(10).toFloat())
+            setPadding(scaledDp(10), scaledDp(10), scaledDp(10), scaledDp(10))
+            elevation = scaledDp(8).toFloat()
         }
         val titleBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -128,7 +140,7 @@ class OverlayController(
         }
         val title = TextView(context).apply {
             text = "选择乐谱"
-            textSize = 16f
+            textSize = scaledText(16f)
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_VERTICAL
         }
@@ -137,25 +149,25 @@ class OverlayController(
             onPickExternalSong()
         }
         val closeButton = button("×") { removeSongPicker() }.apply {
-            minWidth = dp(44)
+            minWidth = scaledDp(44)
         }
-        titleBar.addView(title, LinearLayout.LayoutParams(0, dp(42), 1f))
+        titleBar.addView(title, LinearLayout.LayoutParams(0, scaledDp(42), 1f))
         titleBar.addView(importButton)
         titleBar.addView(closeButton)
 
         val search = EditText(context).apply {
             hint = "搜索乐谱"
             setSingleLine(true)
-            textSize = 15f
+            textSize = scaledText(15f)
             setTextColor(Color.WHITE)
             setHintTextColor(Color.argb(170, 255, 255, 255))
-            background = rounded(Color.argb(88, 255, 255, 255), dp(8).toFloat())
-            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(Color.argb(88, 255, 255, 255), scaledDp(8).toFloat())
+            setPadding(scaledDp(12), 0, scaledDp(12), 0)
         }
         val countLabel = TextView(context).apply {
             setTextColor(Color.argb(210, 255, 255, 255))
-            textSize = 12f
-            setPadding(dp(4), dp(6), dp(4), dp(4))
+            textSize = scaledText(12f)
+            setPadding(scaledDp(4), scaledDp(6), scaledDp(4), scaledDp(4))
         }
         val list = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -196,8 +208,8 @@ class OverlayController(
         })
 
         root.addView(titleBar)
-        root.addView(search, LinearLayout.LayoutParams(-1, dp(42)).apply {
-            setMargins(0, dp(4), 0, 0)
+        root.addView(search, LinearLayout.LayoutParams(-1, scaledDp(42)).apply {
+            setMargins(0, scaledDp(4), 0, 0)
         })
         root.addView(countLabel)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -247,17 +259,18 @@ class OverlayController(
             text = "覆盖全部琴键区域"
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            textSize = 18f
+            textSize = scaledText(18f)
         }
         val handle = TextView(context).apply {
             text = "resize"
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
+            textSize = scaledText(12f)
             setBackgroundColor(Color.argb(150, 0, 0, 0))
         }
         root.addView(grid, FrameLayout.LayoutParams(-1, -1).apply { setMargins(10, 10, 10, 10) })
         root.addView(label, FrameLayout.LayoutParams(-1, -1))
-        root.addView(handle, FrameLayout.LayoutParams(dp(84), dp(44), Gravity.BOTTOM or Gravity.END))
+        root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
         makePositionAdjustable(root)
 
         val params = baseParams().apply {
@@ -326,28 +339,61 @@ class OverlayController(
         controlsParams = null
     }
 
+    private fun cycleUiSize() {
+        val currentX = controlsParams?.x ?: 20
+        val currentY = controlsParams?.y ?: 80
+        val wasPickerOpen = songPickerView != null
+        uiSizeIndex = (uiSizeIndex + 1) % uiScaleValues.size
+        uiPrefs.edit().putInt("uiSizeIndex", uiSizeIndex).apply()
+
+        removeSongPicker()
+        removeControls()
+        showControls(currentX, currentY)
+        if (wasPickerOpen) {
+            showSongPicker()
+        }
+        Toast.makeText(context, "UI大小: ${uiSizeLabels[uiSizeIndex]}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun syncPlaybackControls() {
+        val pause = pauseButton ?: return
+        when {
+            PlaybackController.isPlaying -> {
+                pause.visibility = View.VISIBLE
+                pause.text = "暂停"
+            }
+            PlaybackController.isPaused -> {
+                pause.visibility = View.VISIBLE
+                pause.text = "继续"
+            }
+            else -> {
+                pause.visibility = View.GONE
+                pause.text = "暂停"
+            }
+        }
+    }
+
     override fun onStateChanged(state: String) {
         Toast.makeText(context, state, Toast.LENGTH_SHORT).show()
     }
 
     override fun onPlaybackStarted() {
-        pauseButton?.visibility = View.VISIBLE
-        pauseButton?.text = "暂停"
+        syncPlaybackControls()
     }
 
     override fun onPlaybackPaused() {
-        pauseButton?.visibility = View.VISIBLE
-        pauseButton?.text = "继续"
+        syncPlaybackControls()
     }
 
     override fun onPlaybackResumed() {
-        pauseButton?.visibility = View.VISIBLE
-        pauseButton?.text = "暂停"
+        syncPlaybackControls()
     }
 
-    override fun onPlaybackFinished() {
-        pauseButton?.visibility = View.GONE
-        pauseButton?.text = "暂停"
+    override fun onPlaybackFinished(completed: Boolean) {
+        syncPlaybackControls()
+        if (completed) {
+            Toast.makeText(context, "演奏完成", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun button(text: String, action: (View) -> Unit): Button {
@@ -355,19 +401,19 @@ class OverlayController(
             this.text = text
             isAllCaps = false
             setTextColor(Color.WHITE)
-            textSize = 12f
+            textSize = scaledText(12f)
             minWidth = 0
             minHeight = 0
             minimumWidth = 0
             minimumHeight = 0
             includeFontPadding = false
-            background = rounded(Color.argb(118, 0, 150, 136), dp(6).toFloat())
-            setPadding(dp(4), dp(2), dp(4), dp(2))
+            background = rounded(Color.argb(118, 0, 150, 136), scaledDp(6).toFloat())
+            setPadding(scaledDp(4), scaledDp(2), scaledDp(4), scaledDp(2))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                setMargins(dp(1), dp(1), dp(1), dp(1))
+                setMargins(scaledDp(1), scaledDp(1), scaledDp(1), scaledDp(1))
             }
             setOnClickListener(action)
         }
@@ -381,16 +427,16 @@ class OverlayController(
     ): TextView {
         return TextView(context).apply {
             this.text = text
-            textSize = 15f
+            textSize = scaledText(15f)
             setTextColor(if (enabled) Color.WHITE else Color.argb(170, 255, 255, 255))
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(12), 0)
+            setPadding(scaledDp(12), 0, scaledDp(12), 0)
             background = rounded(
                 if (index % 2 == 0) Color.argb(54, 255, 255, 255) else Color.argb(34, 255, 255, 255),
-                dp(7).toFloat()
+                scaledDp(7).toFloat()
             )
-            layoutParams = LinearLayout.LayoutParams(-1, dp(42)).apply {
-                setMargins(0, dp(3), 0, dp(3))
+            layoutParams = LinearLayout.LayoutParams(-1, scaledDp(42)).apply {
+                setMargins(0, scaledDp(3), 0, scaledDp(3))
             }
             if (enabled && action != null) {
                 setOnClickListener { action() }
@@ -474,7 +520,7 @@ class OverlayController(
                     startH = params.height
                     touchX = event.rawX
                     touchY = event.rawY
-                    resizing = event.x > view.width - dp(96) && event.y > view.height - dp(64)
+                    resizing = event.x > view.width - scaledDp(96) && event.y > view.height - scaledDp(64)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -501,5 +547,14 @@ class OverlayController(
 
     private fun dp(value: Int): Int {
         return (value * context.resources.displayMetrics.density).roundToInt()
+    }
+
+    private fun scaledDp(value: Int): Int {
+        return (value * uiScale * context.resources.displayMetrics.density).roundToInt()
+            .coerceAtLeast(if (value > 0) 1 else 0)
+    }
+
+    private fun scaledText(value: Float): Float {
+        return value * uiScale
     }
 }

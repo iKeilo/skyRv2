@@ -8,7 +8,7 @@ import kotlin.math.roundToLong
 object PlaybackController {
     interface Listener {
         fun onStateChanged(state: String)
-        fun onPlaybackFinished()
+        fun onPlaybackFinished(completed: Boolean)
         fun onPlaybackStarted()
         fun onPlaybackPaused()
         fun onPlaybackResumed()
@@ -81,8 +81,7 @@ object PlaybackController {
                     paused = false
                     worker = null
                     main.post {
-                        listener?.onPlaybackFinished()
-                        listener?.onStateChanged("演奏结束")
+                        listener?.onPlaybackFinished(completed = true)
                     }
                 }
             }
@@ -121,7 +120,7 @@ object PlaybackController {
         }
         oldWorker?.interrupt()
         if (callbackFinished) {
-            main.post { listener?.onPlaybackFinished() }
+            main.post { listener?.onPlaybackFinished(completed = false) }
         }
         if (notifyUser) {
             notify("已结束")
