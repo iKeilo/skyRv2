@@ -1,0 +1,48 @@
+# skyRv2
+
+`skyRv2` 是 `skyR` 的 Kotlin 原生重写项目，用于和原 AutoX/Auto.js 项目隔离维护。
+
+## 当前版本
+
+- 应用名称：自动弹琴R
+- 版本号：0.0.4
+- 包名：`com.ikeilo.skyr`
+- minSdk：26
+- targetSdk：36
+
+## 已实现
+
+1. Kotlin 原生 Android App 工程。
+2. 无障碍服务，使用 `dispatchGesture()` 派发琴键点击。
+3. 半透明悬浮控制条，按钮纵向紧凑排列。
+4. 横屏定位模式，默认 92% 横屏区域居中展开，支持拖动和缩放。
+5. 悬浮选曲窗口，支持搜索内置曲库。
+6. 内置 `app/src/main/assets/music` 曲库。
+7. 系统文件选择器导入外部 SkyStudio 曲谱。
+
+## 构建
+
+需要 JDK 17+、Android SDK Platform 36、Build Tools 36.0.0。
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+Debug APK 输出：
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+当前已构建的测试包：
+
+```text
+build/自动弹琴R_native_v0.0.4-debug.apk
+```
+
+## 更新日志
+
+- 2026/04/19 原生版 0.0.4：定位层改为 92% 横屏区域居中展开；悬浮控制按钮改为纵向紧凑半透明布局。
+- 2026/04/19 原生版 0.0.3：选曲改为悬浮曲库窗口，参考 AutoX 版加入搜索列表；悬浮按钮调整为半透明样式。
+- 2026/04/19 原生版 0.0.2：悬浮窗新增选曲和结束按钮；暂停后按钮显示“继续”；暂停状态点击“开始”会从头重新演奏当前乐谱。
+- 2026/04/19 原生版 0.0.1：创建 Kotlin 原生重写 MVP。

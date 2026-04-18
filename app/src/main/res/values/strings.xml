@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">自动弹琴R</string>
+    <string name="accessibility_service_name">自动弹琴R 无障碍服务</string>
+</resources>
