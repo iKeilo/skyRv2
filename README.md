@@ -1,6 +1,6 @@
 # skyRv2
 
-`skyRv2` 是 `skyR` 的 Kotlin 原生重写项目，用于和原 AutoX/Auto.js 项目隔离维护。</p>
+`skyRv2` 是 `[skyR](https://github.com/iKeilo/skyR)` 的 Kotlin 原生重写项目，用于和原 AutoX/Auto.js 项目隔离维护。</p>
 该项目是为了更好兼容支持安卓10以上的特性</p>
 在UI和功能上都做了一定的优化
 
