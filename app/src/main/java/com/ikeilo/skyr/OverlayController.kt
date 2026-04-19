@@ -39,6 +39,7 @@ class OverlayController(
     private var positionParams: WindowManager.LayoutParams? = null
     private var songPickerParams: WindowManager.LayoutParams? = null
     private var pauseButton: Button? = null
+    private var endButton: Button? = null
     private var positionButton: Button? = null
     private var songLabel: TextView? = null
     private val bundledSongs: List<String> by lazy { loadBundledSongs() }
@@ -83,7 +84,10 @@ class OverlayController(
         pauseButton = button("暂停") { PlaybackController.pauseOrResume() }.apply {
             visibility = View.GONE
         }
-        val end = button("结束") { PlaybackController.stopCurrent() }
+        val end = button("结束") { PlaybackController.stopCurrent() }.apply {
+            visibility = View.GONE
+        }
+        endButton = end
         val speed = button("1x") {
             speedIndex = (speedIndex + 1) % speeds.size
             PlaybackController.speed = speeds[speedIndex]
@@ -357,18 +361,22 @@ class OverlayController(
 
     private fun syncPlaybackControls() {
         val pause = pauseButton ?: return
+        val end = endButton ?: return
         when {
             PlaybackController.isPlaying -> {
                 pause.visibility = View.VISIBLE
                 pause.text = "暂停"
+                end.visibility = View.VISIBLE
             }
             PlaybackController.isPaused -> {
                 pause.visibility = View.VISIBLE
                 pause.text = "继续"
+                end.visibility = View.VISIBLE
             }
             else -> {
                 pause.visibility = View.GONE
                 pause.text = "暂停"
+                end.visibility = View.GONE
             }
         }
     }
