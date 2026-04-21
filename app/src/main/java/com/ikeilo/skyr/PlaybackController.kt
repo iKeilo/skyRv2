@@ -18,6 +18,7 @@ object PlaybackController {
         fun onPlaybackStarted()
         fun onPlaybackPaused()
         fun onPlaybackResumed()
+        fun onPracticeCountdown(seconds: Int)
         fun onPracticeCue(keys: List<Int>, kind: PracticeCueKind, durationMs: Long)
     }
 
@@ -72,6 +73,9 @@ object PlaybackController {
 
         worker = Thread {
             try {
+                if (currentPracticeMode && !runPracticeCountdown(runGeneration)) {
+                    return@Thread
+                }
                 for (event in currentSong.events) {
                     if (shouldStop(runGeneration)) break
                     waitIfPaused(runGeneration)
@@ -172,8 +176,29 @@ object PlaybackController {
         }
     }
 
+    private fun sleepUnscaled(delayMs: Long, runGeneration: Int) {
+        var remaining = delayMs.coerceAtLeast(0L)
+        while (remaining > 0L && !shouldStop(runGeneration)) {
+            waitIfPaused(runGeneration)
+            val chunk = minOf(remaining, 40L)
+            Thread.sleep(chunk)
+            remaining -= chunk
+        }
+    }
+
     private fun shouldStop(runGeneration: Int): Boolean {
         return stopped || generation != runGeneration
+    }
+
+    private fun runPracticeCountdown(runGeneration: Int): Boolean {
+        for (seconds in 3 downTo 1) {
+            if (shouldStop(runGeneration)) return false
+            main.post { listener?.onPracticeCountdown(seconds) }
+            sleepUnscaled(1000L, runGeneration)
+        }
+        if (shouldStop(runGeneration)) return false
+        main.post { listener?.onPracticeCountdown(0) }
+        return true
     }
 
     private fun practiceCueKind(event: MusicEvent): PracticeCueKind {

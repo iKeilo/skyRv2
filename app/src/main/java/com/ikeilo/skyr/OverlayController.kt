@@ -35,15 +35,20 @@ class OverlayController(
     private val uiPrefs = context.getSharedPreferences("overlay_ui", Context.MODE_PRIVATE)
     private var controls: View? = null
     private var positionView: View? = null
+    private var practiceLegendView: View? = null
+    private var authorView: View? = null
     private var songPickerView: View? = null
     private var controlsParams: WindowManager.LayoutParams? = null
     private var positionParams: WindowManager.LayoutParams? = null
+    private var practiceLegendParams: WindowManager.LayoutParams? = null
+    private var authorParams: WindowManager.LayoutParams? = null
     private var songPickerParams: WindowManager.LayoutParams? = null
     private var pauseButton: Button? = null
     private var endButton: Button? = null
     private var practiceButton: Button? = null
     private var positionButton: Button? = null
     private var songLabel: TextView? = null
+    private var positionLabel: TextView? = null
     private var positionOverlayLocked = false
     private var practiceMode = false
     private var practiceCueVersion = 0L
@@ -130,6 +135,7 @@ class OverlayController(
         controlsParams = params
         windowManager.addView(root, params)
         controls = root
+        showAuthorWatermark()
         syncPlaybackControls()
         syncModeControls()
     }
@@ -281,6 +287,7 @@ class OverlayController(
             gravity = Gravity.CENTER
             textSize = scaledText(18f)
         }
+        positionLabel = label
         val handle = TextView(context).apply {
             text = "resize"
             setTextColor(Color.WHITE)
@@ -290,18 +297,6 @@ class OverlayController(
         }
         root.addView(grid, FrameLayout.LayoutParams(-1, -1).apply { setMargins(10, 10, 10, 10) })
         root.addView(label, FrameLayout.LayoutParams(-1, -1))
-        if (locked) {
-            root.addView(
-                practiceLegend(),
-                FrameLayout.LayoutParams(
-                    scaledDp(96),
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.END or Gravity.CENTER_VERTICAL
-                ).apply {
-                    setMargins(0, 0, scaledDp(8), 0)
-                }
-            )
-        }
         if (!locked) {
             root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
             makePositionAdjustable(root)
@@ -316,6 +311,9 @@ class OverlayController(
         positionParams = params
         windowManager.addView(root, params)
         positionView = root
+        if (locked) {
+            showPracticeLegend(bounds)
+        }
         syncModeControls()
     }
 
@@ -356,10 +354,12 @@ class OverlayController(
 
     private fun removePositionOverlay() {
         positionView?.let { windowManager.removeView(it) }
+        removePracticeLegend()
         positionView = null
         positionParams = null
         positionOverlayLocked = false
         practiceCells.clear()
+        positionLabel = null
         clearPracticeHighlights()
         syncModeControls()
     }
@@ -372,8 +372,21 @@ class OverlayController(
 
     private fun removeControls() {
         controls?.let { windowManager.removeView(it) }
+        removeAuthorWatermark()
         controls = null
         controlsParams = null
+    }
+
+    private fun removePracticeLegend() {
+        practiceLegendView?.let { windowManager.removeView(it) }
+        practiceLegendView = null
+        practiceLegendParams = null
+    }
+
+    private fun removeAuthorWatermark() {
+        authorView?.let { windowManager.removeView(it) }
+        authorView = null
+        authorParams = null
     }
 
     private fun cycleUiSize() {
@@ -473,8 +486,25 @@ class OverlayController(
     override fun onPlaybackFinished(completed: Boolean) {
         syncPlaybackControls()
         clearPracticeHighlights()
+        if (practiceMode) {
+            positionLabel?.apply {
+                text = "跟练模式"
+                textSize = scaledText(18f)
+            }
+        }
         if (completed) {
             Toast.makeText(context, "演奏完成", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onPracticeCountdown(seconds: Int) {
+        if (!practiceMode) return
+        if (positionView == null || !positionOverlayLocked) {
+            showPracticeOverlay()
+        }
+        positionLabel?.apply {
+            text = if (seconds > 0) seconds.toString() else ""
+            textSize = if (seconds > 0) scaledText(54f) else scaledText(18f)
         }
     }
 
@@ -483,6 +513,7 @@ class OverlayController(
         if (positionView == null || !positionOverlayLocked) {
             showPracticeOverlay()
         }
+        positionLabel?.text = ""
         practiceCueVersion += 1
         val version = practiceCueVersion
         clearPracticeHighlights(incrementVersion = false)
@@ -494,9 +525,9 @@ class OverlayController(
         keys.forEach { key ->
             practiceCells.getOrNull(key)?.setBackgroundColor(color)
         }
-        val visibleMs = ((durationMs.takeIf { it > 0L } ?: 220L) * (1.0 / PlaybackController.speed))
+        val visibleMs = ((durationMs.takeIf { it > 0L } ?: 500L) * (1.0 / PlaybackController.speed))
             .roundToLong()
-            .coerceIn(120L, 1400L)
+            .coerceIn(500L, 2200L)
         positionView?.postDelayed({
             if (practiceCueVersion == version) {
                 clearPracticeHighlights()
@@ -602,6 +633,53 @@ class OverlayController(
                 })
             }
         }
+    }
+
+    private fun showPracticeLegend(bounds: OverlayBounds) {
+        removePracticeLegend()
+        val metrics = context.resources.displayMetrics
+        val overlayWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
+        val width = scaledDp(108)
+        val height = scaledDp(78)
+        val margin = scaledDp(8)
+        val view = practiceLegend()
+        val params = baseParams(touchable = false).apply {
+            this.width = width
+            this.height = WindowManager.LayoutParams.WRAP_CONTENT
+            this.x = (bounds.x + bounds.width + margin)
+                .coerceAtMost(overlayWidth - width - margin)
+                .coerceAtLeast(margin)
+            this.y = (bounds.y + (bounds.height - height) / 2)
+                .coerceAtLeast(margin)
+        }
+        practiceLegendParams = params
+        practiceLegendView = view
+        windowManager.addView(view, params)
+    }
+
+    private fun showAuthorWatermark() {
+        if (authorView != null) return
+        val metrics = context.resources.displayMetrics
+        val width = scaledDp(92)
+        val height = scaledDp(24)
+        val margin = scaledDp(10)
+        val view = TextView(context).apply {
+            text = "By:iKeilo"
+            setTextColor(Color.argb(210, 255, 255, 255))
+            textSize = scaledText(11f)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            background = rounded(Color.argb(88, 0, 0, 0), scaledDp(6).toFloat())
+        }
+        val params = baseParams(touchable = false).apply {
+            this.width = width
+            this.height = height
+            this.x = (metrics.widthPixels - width - margin).coerceAtLeast(margin)
+            this.y = (metrics.heightPixels - height - margin).coerceAtLeast(margin)
+        }
+        authorParams = params
+        authorView = view
+        windowManager.addView(view, params)
     }
 
     private fun defaultPracticeCellColor(): Int {
