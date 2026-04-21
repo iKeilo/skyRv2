@@ -22,7 +22,7 @@ class SkyAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    fun tap(points: List<PointF>): Boolean {
+    fun tap(points: List<PointF>, onFinished: (() -> Unit)? = null): Boolean {
         if (points.isEmpty()) return false
         val builder = GestureDescription.Builder()
         points.forEach { point ->
@@ -32,7 +32,24 @@ class SkyAccessibilityService : AccessibilityService() {
             }
             builder.addStroke(GestureDescription.StrokeDescription(path, 0L, 60L))
         }
-        return dispatchGesture(builder.build(), null, null)
+        val callback = if (onFinished == null) {
+            null
+        } else {
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    onFinished()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    onFinished()
+                }
+            }
+        }
+        val dispatched = dispatchGesture(builder.build(), callback, null)
+        if (!dispatched) {
+            onFinished?.invoke()
+        }
+        return dispatched
     }
 
     companion object {

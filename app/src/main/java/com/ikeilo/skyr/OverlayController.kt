@@ -658,9 +658,36 @@ class OverlayController(
         pendingTouchKeys.clear()
         pendingTouchPoints.clear()
         positionView?.postDelayed({
-            SkyAccessibilityService.activeService?.tap(points)
+            forwardPracticeTouches(points)
             scorePracticeTouch(keys)
         }, TOUCH_FORWARD_DELAY_MS)
+    }
+
+    private fun forwardPracticeTouches(points: List<PointF>) {
+        val service = SkyAccessibilityService.activeService ?: return
+        setPracticeOverlayTouchable(false)
+        val dispatched = service.tap(points) {
+            positionView?.post {
+                if (positionOverlayLocked && SkyAccessibilityService.isRunning) {
+                    setPracticeOverlayTouchable(true)
+                }
+            }
+        }
+        if (!dispatched) {
+            setPracticeOverlayTouchable(true)
+        }
+    }
+
+    private fun setPracticeOverlayTouchable(touchable: Boolean) {
+        if (!positionOverlayLocked) return
+        val view = positionView ?: return
+        val params = positionParams ?: return
+        params.flags = if (touchable) {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        windowManager.updateViewLayout(view, params)
     }
 
     private fun scorePracticeTouch(keys: Set<Int>) {
