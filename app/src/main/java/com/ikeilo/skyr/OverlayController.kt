@@ -290,12 +290,24 @@ class OverlayController(
         }
         root.addView(grid, FrameLayout.LayoutParams(-1, -1).apply { setMargins(10, 10, 10, 10) })
         root.addView(label, FrameLayout.LayoutParams(-1, -1))
+        if (locked) {
+            root.addView(
+                practiceLegend(),
+                FrameLayout.LayoutParams(
+                    scaledDp(96),
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.END or Gravity.CENTER_VERTICAL
+                ).apply {
+                    setMargins(0, 0, scaledDp(8), 0)
+                }
+            )
+        }
         if (!locked) {
             root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
             makePositionAdjustable(root)
         }
 
-        val params = baseParams().apply {
+        val params = baseParams(touchable = !locked).apply {
             this.width = bounds.width
             this.height = bounds.height
             this.x = bounds.x
@@ -540,9 +552,10 @@ class OverlayController(
         }
     }
 
-    private fun baseParams(focusable: Boolean = false): WindowManager.LayoutParams {
+    private fun baseParams(focusable: Boolean = false, touchable: Boolean = true): WindowManager.LayoutParams {
         val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            (if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            (if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or
+            (if (touchable) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
         return WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -565,6 +578,29 @@ class OverlayController(
         return GradientDrawable().apply {
             setColor(color)
             cornerRadius = radius
+        }
+    }
+
+    private fun practiceLegend(): LinearLayout {
+        val items = listOf(
+            "绿色: 单击" to Color.rgb(42, 214, 116),
+            "蓝色: 同时按" to Color.rgb(33, 150, 243),
+            "白色: 长按" to Color.WHITE
+        )
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.argb(104, 0, 0, 0), scaledDp(6).toFloat())
+            setPadding(scaledDp(6), scaledDp(5), scaledDp(6), scaledDp(5))
+            items.forEach { (label, color) ->
+                addView(TextView(context).apply {
+                    text = label
+                    setTextColor(color)
+                    textSize = scaledText(11f)
+                    includeFontPadding = false
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, scaledDp(2), 0, scaledDp(2))
+                })
+            }
         }
     }
 
