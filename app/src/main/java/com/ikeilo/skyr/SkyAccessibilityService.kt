@@ -26,8 +26,11 @@ class SkyAccessibilityService : AccessibilityService() {
         if (points.isEmpty()) return false
         val builder = GestureDescription.Builder()
         points.forEach { point ->
-            val path = Path().apply { moveTo(point.x, point.y) }
-            builder.addStroke(GestureDescription.StrokeDescription(path, 0L, 40L))
+            val path = Path().apply {
+                moveTo(point.x, point.y)
+                lineTo(point.x + 0.1f, point.y + 0.1f)
+            }
+            builder.addStroke(GestureDescription.StrokeDescription(path, 0L, 60L))
         }
         return dispatchGesture(builder.build(), null, null)
     }

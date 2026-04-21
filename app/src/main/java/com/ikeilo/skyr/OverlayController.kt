@@ -61,7 +61,6 @@ class OverlayController(
     private var positionOverlayLocked = false
     private var practiceMode = false
     private var practiceCueVersion = 0L
-    private var practiceTouchGroupVersion = 0L
     private var currentCue: ExpectedCue? = null
     private var practiceStats = PracticeStats()
     private var lastScoreText = ""
@@ -614,19 +613,28 @@ class OverlayController(
     private fun handlePracticeTouch(view: View, event: MotionEvent, bounds: OverlayBounds): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
-            MotionEvent.ACTION_POINTER_DOWN,
-            MotionEvent.ACTION_UP,
-            MotionEvent.ACTION_POINTER_UP -> {
+            MotionEvent.ACTION_POINTER_DOWN -> {
                 val pointerIndex = event.actionIndex
                 val rawPoint = rawPoint(view, event, pointerIndex)
                 val key = keyAt(rawPoint.x, rawPoint.y, bounds)
                 if (key != null) {
                     pendingTouchKeys += key
                     pendingTouchPoints[key] = rawPoint
-                    schedulePracticeTouchGroup()
                 }
                 return true
             }
+            MotionEvent.ACTION_UP -> {
+                val pointerIndex = event.actionIndex
+                val rawPoint = rawPoint(view, event, pointerIndex)
+                val key = keyAt(rawPoint.x, rawPoint.y, bounds)
+                if (key != null) {
+                    pendingTouchKeys += key
+                    pendingTouchPoints[key] = rawPoint
+                }
+                finalizePracticeTouchGroup()
+                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> return true
             MotionEvent.ACTION_MOVE -> return true
             MotionEvent.ACTION_CANCEL -> {
                 pendingTouchKeys.clear()
@@ -643,24 +651,16 @@ class OverlayController(
         return PointF(location[0] + event.getX(pointerIndex), location[1] + event.getY(pointerIndex))
     }
 
-    private fun schedulePracticeTouchGroup() {
-        practiceTouchGroupVersion += 1
-        val version = practiceTouchGroupVersion
-        positionView?.postDelayed({
-            if (practiceTouchGroupVersion == version) {
-                finalizePracticeTouchGroup()
-            }
-        }, TOUCH_GROUP_MS)
-    }
-
     private fun finalizePracticeTouchGroup() {
         if (pendingTouchKeys.isEmpty()) return
         val keys = pendingTouchKeys.toSet()
         val points = pendingTouchPoints.values.toList()
         pendingTouchKeys.clear()
         pendingTouchPoints.clear()
-        SkyAccessibilityService.activeService?.tap(points)
-        scorePracticeTouch(keys)
+        positionView?.postDelayed({
+            SkyAccessibilityService.activeService?.tap(points)
+            scorePracticeTouch(keys)
+        }, TOUCH_FORWARD_DELAY_MS)
     }
 
     private fun scorePracticeTouch(keys: Set<Int>) {
@@ -1122,6 +1122,6 @@ class OverlayController(
     )
 
     private companion object {
-        const val TOUCH_GROUP_MS = 90L
+        const val TOUCH_FORWARD_DELAY_MS = 35L
     }
 }
