@@ -1,10 +1,16 @@
 package com.ikeilo.skyr
 
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.text.Editable
 import android.text.TextWatcher
 import android.provider.Settings
@@ -53,6 +59,7 @@ class OverlayController(
     private var practiceMode = false
     private var practiceCueVersion = 0L
     private val practiceCells = mutableListOf<TextView>()
+    private val practiceFadeAnimators = mutableMapOf<Int, ValueAnimator>()
     private val bundledSongs: List<String> by lazy { loadBundledSongs() }
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
@@ -358,9 +365,9 @@ class OverlayController(
         positionView = null
         positionParams = null
         positionOverlayLocked = false
-        practiceCells.clear()
         positionLabel = null
         clearPracticeHighlights()
+        practiceCells.clear()
         syncModeControls()
     }
 
@@ -522,17 +529,9 @@ class OverlayController(
             PlaybackController.PracticeCueKind.SIMULTANEOUS -> Color.argb(198, 33, 150, 243)
             PlaybackController.PracticeCueKind.LONG_PRESS -> Color.argb(216, 255, 255, 255)
         }
-        keys.forEach { key ->
-            practiceCells.getOrNull(key)?.setBackgroundColor(color)
-        }
-        val visibleMs = ((durationMs.takeIf { it > 0L } ?: 500L) * (1.0 / PlaybackController.speed))
-            .roundToLong()
-            .coerceIn(500L, 2200L)
-        positionView?.postDelayed({
-            if (practiceCueVersion == version) {
-                clearPracticeHighlights()
-            }
-        }, visibleMs)
+        val visibleMs = practiceCueVisibleMs(durationMs)
+        vibratePracticeCue(kind)
+        keys.forEach { key -> showPracticeCell(key, color, visibleMs, version) }
     }
 
     private fun button(text: String, action: (View) -> Unit): Button {
@@ -690,7 +689,60 @@ class OverlayController(
         if (incrementVersion) {
             practiceCueVersion += 1
         }
+        practiceFadeAnimators.values.forEach { it.cancel() }
+        practiceFadeAnimators.clear()
         practiceCells.forEach { it.setBackgroundColor(defaultPracticeCellColor()) }
+    }
+
+    private fun showPracticeCell(key: Int, color: Int, visibleMs: Long, version: Long) {
+        val cell = practiceCells.getOrNull(key) ?: return
+        practiceFadeAnimators.remove(key)?.cancel()
+        cell.setBackgroundColor(color)
+
+        val fadeMs = (visibleMs * 0.35).roundToLong().coerceIn(180L, 900L)
+        val holdMs = (visibleMs - fadeMs).coerceAtLeast(0L)
+        val targetColor = defaultPracticeCellColor()
+        cell.postDelayed({
+            if (practiceCueVersion != version) return@postDelayed
+            val animator = ValueAnimator.ofObject(ArgbEvaluator(), color, targetColor).apply {
+                duration = fadeMs
+                addUpdateListener { animation ->
+                    cell.setBackgroundColor(animation.animatedValue as Int)
+                }
+            }
+            practiceFadeAnimators[key] = animator
+            animator.start()
+        }, holdMs)
+    }
+
+    private fun practiceCueVisibleMs(durationMs: Long): Long {
+        val baseMs = durationMs.takeIf { it > 0L } ?: 500L
+        val speedScale = (1.0 / PlaybackController.speed.coerceAtLeast(0.1)).coerceIn(0.25, 4.0)
+        return (baseMs * speedScale).roundToLong().coerceIn(500L, 4000L)
+    }
+
+    private fun vibratePracticeCue(kind: PlaybackController.PracticeCueKind) {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Vibrator::class.java)
+        } ?: return
+        if (!vibrator.hasVibrator()) return
+
+        val effect = when (kind) {
+            PlaybackController.PracticeCueKind.SINGLE ->
+                VibrationEffect.createOneShot(24L, 96)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS ->
+                VibrationEffect.createWaveform(
+                    longArrayOf(0L, 36L, 42L, 56L),
+                    intArrayOf(0, 150, 0, 215),
+                    -1
+                )
+            PlaybackController.PracticeCueKind.LONG_PRESS ->
+                VibrationEffect.createOneShot(90L, 190)
+        }
+        vibrator.vibrate(effect)
     }
 
     private fun defaultPositionBounds(screenWidth: Int, screenHeight: Int): OverlayBounds {
