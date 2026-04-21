@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -55,9 +56,17 @@ class OverlayController(
     private var positionButton: Button? = null
     private var songLabel: TextView? = null
     private var positionLabel: TextView? = null
+    private var lastScoreLabel: TextView? = null
+    private var comboLabel: TextView? = null
     private var positionOverlayLocked = false
     private var practiceMode = false
     private var practiceCueVersion = 0L
+    private var practiceTouchGroupVersion = 0L
+    private var currentCue: ExpectedCue? = null
+    private var practiceStats = PracticeStats()
+    private var lastScoreText = ""
+    private val pendingTouchKeys = linkedSetOf<Int>()
+    private val pendingTouchPoints = mutableMapOf<Int, PointF>()
     private val practiceCells = mutableListOf<TextView>()
     private val practiceFadeAnimators = mutableMapOf<Int, ValueAnimator>()
     private val bundledSongs: List<String> by lazy { loadBundledSongs() }
@@ -295,6 +304,25 @@ class OverlayController(
             textSize = scaledText(18f)
         }
         positionLabel = label
+        val scoreLabel = TextView(context).apply {
+            text = lastScoreText
+            setTextColor(Color.argb(230, 255, 255, 255))
+            textSize = scaledText(12f)
+            includeFontPadding = false
+            background = rounded(Color.argb(82, 0, 0, 0), scaledDp(5).toFloat())
+            setPadding(scaledDp(5), scaledDp(3), scaledDp(5), scaledDp(3))
+            visibility = if (locked && lastScoreText.isNotBlank()) View.VISIBLE else View.GONE
+        }
+        lastScoreLabel = scoreLabel
+        val currentComboLabel = TextView(context).apply {
+            setTextColor(Color.argb(235, 255, 230, 128))
+            textSize = scaledText(13f)
+            includeFontPadding = false
+            background = rounded(Color.argb(82, 0, 0, 0), scaledDp(5).toFloat())
+            setPadding(scaledDp(5), scaledDp(3), scaledDp(5), scaledDp(3))
+            visibility = View.GONE
+        }
+        comboLabel = currentComboLabel
         val handle = TextView(context).apply {
             text = "resize"
             setTextColor(Color.WHITE)
@@ -304,12 +332,39 @@ class OverlayController(
         }
         root.addView(grid, FrameLayout.LayoutParams(-1, -1).apply { setMargins(10, 10, 10, 10) })
         root.addView(label, FrameLayout.LayoutParams(-1, -1))
+        if (locked) {
+            root.addView(
+                scoreLabel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.START
+                ).apply {
+                    setMargins(scaledDp(10), scaledDp(10), 0, 0)
+                }
+            )
+            root.addView(
+                currentComboLabel,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END
+                ).apply {
+                    setMargins(0, scaledDp(10), scaledDp(10), 0)
+                }
+            )
+        }
         if (!locked) {
             root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
             makePositionAdjustable(root)
         }
 
-        val params = baseParams(touchable = !locked).apply {
+        val capturePracticeTouches = locked && SkyAccessibilityService.isRunning
+        if (capturePracticeTouches) {
+            root.setOnTouchListener { view, event -> handlePracticeTouch(view, event, bounds) }
+        }
+
+        val params = baseParams(touchable = !locked || capturePracticeTouches).apply {
             this.width = bounds.width
             this.height = bounds.height
             this.x = bounds.x
@@ -366,6 +421,8 @@ class OverlayController(
         positionParams = null
         positionOverlayLocked = false
         positionLabel = null
+        lastScoreLabel = null
+        comboLabel = null
         clearPracticeHighlights()
         practiceCells.clear()
         syncModeControls()
@@ -479,6 +536,13 @@ class OverlayController(
     }
 
     override fun onPlaybackStarted() {
+        if (practiceMode) {
+            practiceStats = PracticeStats(startedAtMs = SystemClock.uptimeMillis())
+            currentCue = null
+            pendingTouchKeys.clear()
+            pendingTouchPoints.clear()
+            updateComboLabel()
+        }
         syncPlaybackControls()
     }
 
@@ -494,6 +558,8 @@ class OverlayController(
         syncPlaybackControls()
         clearPracticeHighlights()
         if (practiceMode) {
+            markCurrentCueMissed()
+            showPracticeScore()
             positionLabel?.apply {
                 text = "跟练模式"
                 textSize = scaledText(18f)
@@ -521,17 +587,177 @@ class OverlayController(
             showPracticeOverlay()
         }
         positionLabel?.text = ""
+        markCurrentCueMissed()
+        currentCue = ExpectedCue(
+            keys = keys.toSet(),
+            kind = kind,
+            shownAtMs = SystemClock.uptimeMillis(),
+            remainingHits = if (kind == PlaybackController.PracticeCueKind.DOUBLE ||
+                kind == PlaybackController.PracticeCueKind.SIMULTANEOUS_DOUBLE
+            ) 2 else 1
+        )
+        practiceStats = practiceStats.copy(total = practiceStats.total + 1)
         practiceCueVersion += 1
         val version = practiceCueVersion
         clearPracticeHighlights(incrementVersion = false)
         val color = when (kind) {
             PlaybackController.PracticeCueKind.SINGLE -> Color.argb(190, 42, 214, 116)
             PlaybackController.PracticeCueKind.SIMULTANEOUS -> Color.argb(198, 33, 150, 243)
-            PlaybackController.PracticeCueKind.LONG_PRESS -> Color.argb(216, 255, 255, 255)
+            PlaybackController.PracticeCueKind.DOUBLE -> Color.argb(216, 255, 255, 255)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS_DOUBLE -> Color.argb(210, 156, 39, 176)
         }
         val visibleMs = practiceCueVisibleMs(durationMs)
         vibratePracticeCue(kind)
         keys.forEach { key -> showPracticeCell(key, color, visibleMs, version) }
+    }
+
+    private fun handlePracticeTouch(view: View, event: MotionEvent, bounds: OverlayBounds): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN,
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP -> {
+                val pointerIndex = event.actionIndex
+                val rawPoint = rawPoint(view, event, pointerIndex)
+                val key = keyAt(rawPoint.x, rawPoint.y, bounds)
+                if (key != null) {
+                    pendingTouchKeys += key
+                    pendingTouchPoints[key] = rawPoint
+                    schedulePracticeTouchGroup()
+                }
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> return true
+            MotionEvent.ACTION_CANCEL -> {
+                pendingTouchKeys.clear()
+                pendingTouchPoints.clear()
+                return true
+            }
+        }
+        return true
+    }
+
+    private fun rawPoint(view: View, event: MotionEvent, pointerIndex: Int): PointF {
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return PointF(location[0] + event.getX(pointerIndex), location[1] + event.getY(pointerIndex))
+    }
+
+    private fun schedulePracticeTouchGroup() {
+        practiceTouchGroupVersion += 1
+        val version = practiceTouchGroupVersion
+        positionView?.postDelayed({
+            if (practiceTouchGroupVersion == version) {
+                finalizePracticeTouchGroup()
+            }
+        }, TOUCH_GROUP_MS)
+    }
+
+    private fun finalizePracticeTouchGroup() {
+        if (pendingTouchKeys.isEmpty()) return
+        val keys = pendingTouchKeys.toSet()
+        val points = pendingTouchPoints.values.toList()
+        pendingTouchKeys.clear()
+        pendingTouchPoints.clear()
+        SkyAccessibilityService.activeService?.tap(points)
+        scorePracticeTouch(keys)
+    }
+
+    private fun scorePracticeTouch(keys: Set<Int>) {
+        val cue = currentCue
+        if (cue == null) {
+            registerPracticeMistake()
+            return
+        }
+        val elapsedMs = SystemClock.uptimeMillis() - cue.shownAtMs
+        if (keys == cue.keys) {
+            if (cue.remainingHits > 1) {
+                currentCue = cue.copy(remainingHits = cue.remainingHits - 1)
+                return
+            }
+            val newStreak = practiceStats.streak + 1
+            practiceStats = practiceStats.copy(
+                matched = practiceStats.matched + 1,
+                streak = newStreak,
+                maxStreak = maxOf(practiceStats.maxStreak, newStreak),
+                responseTotalMs = practiceStats.responseTotalMs + elapsedMs.coerceAtLeast(0L)
+            )
+            updateComboLabel()
+            currentCue = null
+        } else {
+            registerPracticeMistake()
+        }
+    }
+
+    private fun markCurrentCueMissed() {
+        if (currentCue != null) {
+            registerPracticeMistake()
+            currentCue = null
+        }
+    }
+
+    private fun registerPracticeMistake() {
+        practiceStats = practiceStats.copy(
+            mistakes = practiceStats.mistakes + 1,
+            streak = 0
+        )
+        updateComboLabel()
+    }
+
+    private fun updateComboLabel() {
+        val streak = practiceStats.streak
+        comboLabel?.apply {
+            if (streak >= 3) {
+                text = "COMBO $streak"
+                visibility = View.VISIBLE
+            } else {
+                visibility = View.GONE
+            }
+        }
+    }
+
+    private fun showPracticeScore() {
+        val total = practiceStats.total.coerceAtLeast(1)
+        val accuracy = practiceStats.matched.toDouble() / total
+        val avgResponse = if (practiceStats.matched > 0) {
+            practiceStats.responseTotalMs.toDouble() / practiceStats.matched
+        } else {
+            2500.0
+        }
+        val timingScore = (1.0 - (avgResponse / 1800.0)).coerceIn(0.0, 1.0)
+        val mistakePenalty = (practiceStats.mistakes * 0.025).coerceAtMost(0.35)
+        val score = (accuracy * 0.72 + timingScore * 0.28 - mistakePenalty).coerceIn(0.0, 1.0)
+        val grade = when {
+            score >= 0.95 -> "S"
+            score >= 0.85 -> "A"
+            score >= 0.70 -> "B"
+            else -> "C"
+        }
+        val accuracyPercent = accuracy * 100.0
+        lastScoreText = "上次: $grade ${"%.2f".format(Locale.US, accuracyPercent)}%"
+        lastScoreLabel?.apply {
+            text = lastScoreText
+            visibility = View.VISIBLE
+        }
+        positionLabel?.apply {
+            text = grade
+            textSize = scaledText(72f)
+            alpha = 1f
+            animate().alpha(0f).setStartDelay(2000L).setDuration(900L).withEndAction {
+                alpha = 1f
+                text = "跟练模式"
+                textSize = scaledText(18f)
+            }.start()
+        }
+    }
+
+    private fun keyAt(rawX: Float, rawY: Float, bounds: OverlayBounds): Int? {
+        val localX = rawX - bounds.x
+        val localY = rawY - bounds.y
+        if (localX < 0f || localY < 0f || localX > bounds.width || localY > bounds.height) return null
+        val col = (localX / (bounds.width / 5f)).toInt().coerceIn(0, 4)
+        val row = (localY / (bounds.height / 3f)).toInt().coerceIn(0, 2)
+        return row * 5 + col
     }
 
     private fun button(text: String, action: (View) -> Unit): Button {
@@ -615,7 +841,8 @@ class OverlayController(
         val items = listOf(
             "绿色: 单击" to Color.rgb(42, 214, 116),
             "蓝色: 同时按" to Color.rgb(33, 150, 243),
-            "白色: 长按" to Color.WHITE
+            "白色: 双击" to Color.WHITE,
+            "紫色: 同按双击" to Color.rgb(186, 85, 211)
         )
         return LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -739,8 +966,14 @@ class OverlayController(
                     intArrayOf(0, 150, 0, 215),
                     -1
                 )
-            PlaybackController.PracticeCueKind.LONG_PRESS ->
+            PlaybackController.PracticeCueKind.DOUBLE ->
                 VibrationEffect.createOneShot(90L, 190)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS_DOUBLE ->
+                VibrationEffect.createWaveform(
+                    longArrayOf(0L, 45L, 35L, 45L, 35L, 70L),
+                    intArrayOf(0, 165, 0, 165, 0, 230),
+                    -1
+                )
         }
         vibrator.vibrate(effect)
     }
@@ -870,4 +1103,25 @@ class OverlayController(
         val x: Int,
         val y: Int
     )
+
+    private data class ExpectedCue(
+        val keys: Set<Int>,
+        val kind: PlaybackController.PracticeCueKind,
+        val shownAtMs: Long,
+        val remainingHits: Int
+    )
+
+    private data class PracticeStats(
+        val total: Int = 0,
+        val matched: Int = 0,
+        val mistakes: Int = 0,
+        val streak: Int = 0,
+        val maxStreak: Int = 0,
+        val responseTotalMs: Long = 0L,
+        val startedAtMs: Long = 0L
+    )
+
+    private companion object {
+        const val TOUCH_GROUP_MS = 90L
+    }
 }

@@ -9,7 +9,8 @@ object PlaybackController {
     enum class PracticeCueKind {
         SINGLE,
         SIMULTANEOUS,
-        LONG_PRESS
+        DOUBLE,
+        SIMULTANEOUS_DOUBLE
     }
 
     interface Listener {
@@ -76,7 +77,8 @@ object PlaybackController {
                 if (currentPracticeMode && !runPracticeCountdown(runGeneration)) {
                     return@Thread
                 }
-                for (event in currentSong.events) {
+                for (index in currentSong.events.indices) {
+                    val event = currentSong.events[index]
                     if (shouldStop(runGeneration)) break
                     waitIfPaused(runGeneration)
                     if (event.delayMs > 0L) {
@@ -87,7 +89,7 @@ object PlaybackController {
                         if (currentPracticeMode) {
                             val keys = event.keys.filter { it in 0 until 15 }
                             if (keys.isNotEmpty()) {
-                                val kind = practiceCueKind(event)
+                                val kind = practiceCueKind(currentSong.events, index, keys)
                                 main.post {
                                     listener?.onPracticeCue(keys, kind, event.durationMs)
                                 }
@@ -201,17 +203,34 @@ object PlaybackController {
         return true
     }
 
-    private fun practiceCueKind(event: MusicEvent): PracticeCueKind {
+    private fun practiceCueKind(events: List<MusicEvent>, index: Int, keys: List<Int>): PracticeCueKind {
+        val next = nextKeyEvent(events, index)
+        val isDouble = next != null &&
+            next.delayMs <= DOUBLE_TAP_WINDOW_MS &&
+            next.keys.toSet() == keys.toSet()
         return when {
-            event.durationMs >= LONG_PRESS_THRESHOLD_MS -> PracticeCueKind.LONG_PRESS
-            event.keys.size > 1 -> PracticeCueKind.SIMULTANEOUS
+            isDouble && keys.size > 1 -> PracticeCueKind.SIMULTANEOUS_DOUBLE
+            isDouble -> PracticeCueKind.DOUBLE
+            keys.size > 1 -> PracticeCueKind.SIMULTANEOUS
             else -> PracticeCueKind.SINGLE
         }
+    }
+
+    private fun nextKeyEvent(events: List<MusicEvent>, index: Int): MusicEvent? {
+        var delay = 0L
+        for (i in index + 1 until events.size) {
+            val event = events[i]
+            delay += event.delayMs
+            if (event.keys.isNotEmpty()) {
+                return event.copy(delayMs = delay)
+            }
+        }
+        return null
     }
 
     private fun notify(message: String) {
         main.post { listener?.onStateChanged(message) }
     }
 
-    private const val LONG_PRESS_THRESHOLD_MS = 350L
+    private const val DOUBLE_TAP_WINDOW_MS = 320L
 }
