@@ -4,7 +4,8 @@ import android.graphics.PointF
 
 data class MusicEvent(
     val delayMs: Long = 0L,
-    val keys: List<Int> = emptyList()
+    val keys: List<Int> = emptyList(),
+    val durationMs: Long = 0L
 )
 
 data class Song(

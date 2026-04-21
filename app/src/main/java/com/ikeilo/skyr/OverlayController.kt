@@ -22,6 +22,7 @@ import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @SuppressLint("SetTextI18n")
 class OverlayController(
@@ -40,8 +41,13 @@ class OverlayController(
     private var songPickerParams: WindowManager.LayoutParams? = null
     private var pauseButton: Button? = null
     private var endButton: Button? = null
+    private var practiceButton: Button? = null
     private var positionButton: Button? = null
     private var songLabel: TextView? = null
+    private var positionOverlayLocked = false
+    private var practiceMode = false
+    private var practiceCueVersion = 0L
+    private val practiceCells = mutableListOf<TextView>()
     private val bundledSongs: List<String> by lazy { loadBundledSongs() }
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
@@ -53,6 +59,7 @@ class OverlayController(
 
     init {
         PlaybackController.listener = this
+        PlaybackController.practiceMode = practiceMode
         positionStore.load()?.let { PlaybackController.keyPoints = it.points }
     }
 
@@ -81,6 +88,7 @@ class OverlayController(
         }
         val pick = button("选曲") { showSongPicker() }
         val play = button("开始") { PlaybackController.start() }
+        practiceButton = button("跟练关") { togglePracticeMode() }
         pauseButton = button("暂停") { PlaybackController.pauseOrResume() }.apply {
             visibility = View.GONE
         }
@@ -95,7 +103,13 @@ class OverlayController(
         }
         val uiSize = button("UI ${uiSizeLabels[uiSizeIndex]}") { cycleUiSize() }
         positionButton = button("定位") {
-            if (positionView == null) showPositionOverlay() else finishPosition()
+            if (practiceMode) {
+                showPracticeOverlay()
+            } else if (positionView == null) {
+                showPositionOverlay()
+            } else {
+                finishPosition()
+            }
         }
         val exit = button("退出") {
             PlaybackController.stopCurrent()
@@ -104,7 +118,7 @@ class OverlayController(
             removeControls()
         }
         root.addView(songLabel)
-        listOf(pick, play, pauseButton, end, speed, uiSize, positionButton, exit).forEach { root.addView(it) }
+        listOf(pick, play, practiceButton, pauseButton, end, speed, uiSize, positionButton, exit).forEach { root.addView(it) }
         makeDraggable(root) { controlsParams }
 
         val params = baseParams().apply {
@@ -117,6 +131,7 @@ class OverlayController(
         windowManager.addView(root, params)
         controls = root
         syncPlaybackControls()
+        syncModeControls()
     }
 
     private fun showSongPicker() {
@@ -231,18 +246,18 @@ class OverlayController(
         songPickerView = root
     }
 
-    private fun showPositionOverlay() {
+    private fun showPositionOverlay(locked: Boolean = false) {
         if (positionView != null) return
         val metrics = context.resources.displayMetrics
-        val landscapeWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val landscapeHeight = minOf(metrics.widthPixels, metrics.heightPixels)
-        val width = (landscapeWidth * 0.92f).roundToInt()
-        val height = (landscapeHeight * 0.92f).roundToInt()
-        val x = ((landscapeWidth - width) / 2f).roundToInt()
-        val y = ((landscapeHeight - height) / 2f).roundToInt()
+        val bounds = if (locked) practiceOverlayBounds(metrics.widthPixels, metrics.heightPixels) else defaultPositionBounds(
+            metrics.widthPixels,
+            metrics.heightPixels
+        )
+        positionOverlayLocked = locked
+        practiceCells.clear()
 
         val root = FrameLayout(context).apply {
-            setBackgroundColor(Color.argb(70, 255, 204, 0))
+            setBackgroundColor(if (locked) Color.argb(56, 0, 0, 0) else Color.argb(70, 255, 204, 0))
         }
         val grid = GridLayout(context).apply {
             rowCount = 3
@@ -250,8 +265,9 @@ class OverlayController(
         }
         repeat(15) {
             val cell = TextView(context).apply {
-                setBackgroundColor(Color.argb(40, 255, 255, 255))
+                setBackgroundColor(defaultPracticeCellColor())
             }
+            practiceCells += cell
             grid.addView(cell, GridLayout.LayoutParams().apply {
                 columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
                 rowSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
@@ -260,7 +276,7 @@ class OverlayController(
             })
         }
         val label = TextView(context).apply {
-            text = "覆盖全部琴键区域"
+            text = if (locked) "跟练模式" else "覆盖全部琴键区域"
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             textSize = scaledText(18f)
@@ -274,19 +290,21 @@ class OverlayController(
         }
         root.addView(grid, FrameLayout.LayoutParams(-1, -1).apply { setMargins(10, 10, 10, 10) })
         root.addView(label, FrameLayout.LayoutParams(-1, -1))
-        root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
-        makePositionAdjustable(root)
+        if (!locked) {
+            root.addView(handle, FrameLayout.LayoutParams(scaledDp(84), scaledDp(44), Gravity.BOTTOM or Gravity.END))
+            makePositionAdjustable(root)
+        }
 
         val params = baseParams().apply {
-            this.width = width
-            this.height = height
-            this.x = x
-            this.y = y
+            this.width = bounds.width
+            this.height = bounds.height
+            this.x = bounds.x
+            this.y = bounds.y
         }
         positionParams = params
         windowManager.addView(root, params)
         positionView = root
-        positionButton?.text = "定位好了"
+        syncModeControls()
     }
 
     fun onSongSelected(song: Song) {
@@ -328,7 +346,10 @@ class OverlayController(
         positionView?.let { windowManager.removeView(it) }
         positionView = null
         positionParams = null
-        positionButton?.text = "定位"
+        positionOverlayLocked = false
+        practiceCells.clear()
+        clearPracticeHighlights()
+        syncModeControls()
     }
 
     private fun removeSongPicker() {
@@ -347,16 +368,47 @@ class OverlayController(
         val currentX = controlsParams?.x ?: 20
         val currentY = controlsParams?.y ?: 80
         val wasPickerOpen = songPickerView != null
+        val wasPracticeOverlayOpen = practiceMode && positionView != null
         uiSizeIndex = (uiSizeIndex + 1) % uiScaleValues.size
         uiPrefs.edit().putInt("uiSizeIndex", uiSizeIndex).apply()
 
+        if (wasPracticeOverlayOpen) {
+            removePositionOverlay()
+        }
         removeSongPicker()
         removeControls()
         showControls(currentX, currentY)
+        if (wasPracticeOverlayOpen) {
+            showPracticeOverlay()
+        }
         if (wasPickerOpen) {
             showSongPicker()
         }
         Toast.makeText(context, "UI大小: ${uiSizeLabels[uiSizeIndex]}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun togglePracticeMode() {
+        if (PlaybackController.isPlaying || PlaybackController.isPaused) {
+            PlaybackController.stopCurrent()
+        }
+        practiceMode = !practiceMode
+        PlaybackController.practiceMode = practiceMode
+        clearPracticeHighlights()
+        removePositionOverlay()
+        if (practiceMode) {
+            showPracticeOverlay()
+            Toast.makeText(context, "已开启跟练模式", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "已切换为演奏模式", Toast.LENGTH_SHORT).show()
+        }
+        syncModeControls()
+        syncPlaybackControls()
+    }
+
+    private fun showPracticeOverlay() {
+        if (positionView != null && positionOverlayLocked) return
+        removePositionOverlay()
+        showPositionOverlay(locked = true)
     }
 
     private fun syncPlaybackControls() {
@@ -381,6 +433,15 @@ class OverlayController(
         }
     }
 
+    private fun syncModeControls() {
+        practiceButton?.text = if (practiceMode) "跟练开" else "跟练关"
+        positionButton?.text = when {
+            practiceMode -> "跟练区域"
+            positionView != null -> "定位好了"
+            else -> "定位"
+        }
+    }
+
     override fun onStateChanged(state: String) {
         Toast.makeText(context, state, Toast.LENGTH_SHORT).show()
     }
@@ -399,9 +460,36 @@ class OverlayController(
 
     override fun onPlaybackFinished(completed: Boolean) {
         syncPlaybackControls()
+        clearPracticeHighlights()
         if (completed) {
             Toast.makeText(context, "演奏完成", Toast.LENGTH_LONG).show()
         }
+    }
+
+    override fun onPracticeCue(keys: List<Int>, kind: PlaybackController.PracticeCueKind, durationMs: Long) {
+        if (!practiceMode) return
+        if (positionView == null || !positionOverlayLocked) {
+            showPracticeOverlay()
+        }
+        practiceCueVersion += 1
+        val version = practiceCueVersion
+        clearPracticeHighlights(incrementVersion = false)
+        val color = when (kind) {
+            PlaybackController.PracticeCueKind.SINGLE -> Color.argb(190, 42, 214, 116)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS -> Color.argb(198, 33, 150, 243)
+            PlaybackController.PracticeCueKind.LONG_PRESS -> Color.argb(216, 255, 255, 255)
+        }
+        keys.forEach { key ->
+            practiceCells.getOrNull(key)?.setBackgroundColor(color)
+        }
+        val visibleMs = ((durationMs.takeIf { it > 0L } ?: 220L) * (1.0 / PlaybackController.speed))
+            .roundToLong()
+            .coerceIn(120L, 1400L)
+        positionView?.postDelayed({
+            if (practiceCueVersion == version) {
+                clearPracticeHighlights()
+            }
+        }, visibleMs)
     }
 
     private fun button(text: String, action: (View) -> Unit): Button {
@@ -478,6 +566,50 @@ class OverlayController(
             setColor(color)
             cornerRadius = radius
         }
+    }
+
+    private fun defaultPracticeCellColor(): Int {
+        return Color.argb(if (practiceMode) 58 else 40, 255, 255, 255)
+    }
+
+    private fun clearPracticeHighlights(incrementVersion: Boolean = true) {
+        if (incrementVersion) {
+            practiceCueVersion += 1
+        }
+        practiceCells.forEach { it.setBackgroundColor(defaultPracticeCellColor()) }
+    }
+
+    private fun defaultPositionBounds(screenWidth: Int, screenHeight: Int): OverlayBounds {
+        val landscapeWidth = maxOf(screenWidth, screenHeight)
+        val landscapeHeight = minOf(screenWidth, screenHeight)
+        val width = (landscapeWidth * 0.92f).roundToInt()
+        val height = (landscapeHeight * 0.92f).roundToInt()
+        return OverlayBounds(
+            width = width,
+            height = height,
+            x = ((landscapeWidth - width) / 2f).roundToInt(),
+            y = ((landscapeHeight - height) / 2f).roundToInt()
+        )
+    }
+
+    private fun practiceOverlayBounds(screenWidth: Int, screenHeight: Int): OverlayBounds {
+        val points = PlaybackController.keyPoints
+        if (points.size != 15) return defaultPositionBounds(screenWidth, screenHeight)
+
+        val minX = points.minOf { it.x }
+        val maxX = points.maxOf { it.x }
+        val minY = points.minOf { it.y }
+        val maxY = points.maxOf { it.y }
+        val cellW = ((maxX - minX) / 4f).takeIf { it > 0f }
+        val cellH = ((maxY - minY) / 2f).takeIf { it > 0f }
+        if (cellW == null || cellH == null) return defaultPositionBounds(screenWidth, screenHeight)
+
+        return OverlayBounds(
+            width = (cellW * 5f).roundToInt(),
+            height = (cellH * 3f).roundToInt(),
+            x = (minX - cellW / 2f).roundToInt(),
+            y = (minY - cellH / 2f).roundToInt()
+        )
     }
 
     private fun makeDraggable(view: View, paramsProvider: () -> WindowManager.LayoutParams?) {
@@ -565,4 +697,11 @@ class OverlayController(
     private fun scaledText(value: Float): Float {
         return value * uiScale
     }
+
+    private data class OverlayBounds(
+        val width: Int,
+        val height: Int,
+        val x: Int,
+        val y: Int
+    )
 }

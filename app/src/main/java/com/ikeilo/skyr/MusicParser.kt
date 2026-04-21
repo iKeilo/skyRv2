@@ -36,7 +36,7 @@ object MusicParser {
         if (firstTime > 0L) {
             events += MusicEvent(delayMs = firstTime)
         }
-        events += MusicEvent(keys = listOf(parseKey(first)))
+        events += MusicEvent(keys = listOf(parseKey(first)), durationMs = parseDuration(first))
 
         for (i in 1 until notes.length()) {
             val current = notes.getJSONObject(i)
@@ -44,15 +44,16 @@ object MusicParser {
             val currentTime = current.optLong("time", 0L)
             val previousTime = previous.optLong("time", 0L)
             val key = parseKey(current)
+            val duration = parseDuration(current)
             if (currentTime == previousTime && events.isNotEmpty() && events.last().keys.isNotEmpty()) {
                 val last = events.removeAt(events.lastIndex)
-                events += last.copy(keys = last.keys + key)
+                events += last.copy(keys = last.keys + key, durationMs = maxOf(last.durationMs, duration))
             } else {
                 val delay = (currentTime - previousTime).coerceAtLeast(0L)
                 if (delay > 0L) {
                     events += MusicEvent(delayMs = delay)
                 }
-                events += MusicEvent(keys = listOf(key))
+                events += MusicEvent(keys = listOf(key), durationMs = duration)
             }
         }
 
@@ -67,5 +68,15 @@ object MusicParser {
         val match = keyPattern.matchEntire(raw)
             ?: throw IllegalArgumentException("无法识别按键: $raw")
         return match.groupValues[1].toInt()
+    }
+
+    private fun parseDuration(note: JSONObject): Long {
+        val fields = listOf("duration", "durationMs", "hold", "holdMs", "holdTime", "pressTime", "length")
+        fields.forEach { field ->
+            if (note.has(field)) {
+                return note.optLong(field, 0L).coerceAtLeast(0L)
+            }
+        }
+        return if (note.optBoolean("isLongPress", false)) 600L else 0L
     }
 }

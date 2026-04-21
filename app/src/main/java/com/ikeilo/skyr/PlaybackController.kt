@@ -6,12 +6,19 @@ import android.os.Looper
 import kotlin.math.roundToLong
 
 object PlaybackController {
+    enum class PracticeCueKind {
+        SINGLE,
+        SIMULTANEOUS,
+        LONG_PRESS
+    }
+
     interface Listener {
         fun onStateChanged(state: String)
         fun onPlaybackFinished(completed: Boolean)
         fun onPlaybackStarted()
         fun onPlaybackPaused()
         fun onPlaybackResumed()
+        fun onPracticeCue(keys: List<Int>, kind: PracticeCueKind, durationMs: Long)
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -26,17 +33,23 @@ object PlaybackController {
     var song: Song? = null
     var keyPoints: List<PointF> = emptyList()
     var speed: Double = 1.0
+    var practiceMode: Boolean = false
 
     val isPlaying: Boolean
-        get() = worker?.isAlive == true && !paused
+        get() = worker != null && !stopped && !paused
 
     val isPaused: Boolean
-        get() = worker?.isAlive == true && paused
+        get() = worker != null && !stopped && paused
 
     fun start() {
         val currentSong = song ?: return notify("请先选择乐谱")
-        if (keyPoints.size != 15) return notify("请先定位琴键")
-        val service = SkyAccessibilityService.activeService ?: return notify("无障碍服务未启动")
+        val currentPracticeMode = practiceMode
+        if (!currentPracticeMode && keyPoints.size != 15) return notify("请先定位琴键")
+        val service = if (currentPracticeMode) {
+            null
+        } else {
+            SkyAccessibilityService.activeService ?: return notify("无障碍服务未启动")
+        }
         synchronized(lock) {
             if (worker?.isAlive == true && !paused) {
                 notify("正在演奏")
@@ -53,7 +66,8 @@ object PlaybackController {
         paused = false
         main.post {
             listener?.onPlaybackStarted()
-            listener?.onStateChanged("开始演奏: ${currentSong.name}")
+            val prefix = if (currentPracticeMode) "开始跟练" else "开始演奏"
+            listener?.onStateChanged("$prefix: ${currentSong.name}")
         }
 
         worker = Thread {
@@ -66,9 +80,19 @@ object PlaybackController {
                     }
                     if (shouldStop(runGeneration)) break
                     if (event.keys.isNotEmpty()) {
-                        val points = event.keys.mapNotNull { keyPoints.getOrNull(it) }
-                        if (!service.tap(points)) {
-                            notify("手势派发失败")
+                        if (currentPracticeMode) {
+                            val keys = event.keys.filter { it in 0 until 15 }
+                            if (keys.isNotEmpty()) {
+                                val kind = practiceCueKind(event)
+                                main.post {
+                                    listener?.onPracticeCue(keys, kind, event.durationMs)
+                                }
+                            }
+                        } else {
+                            val points = event.keys.mapNotNull { keyPoints.getOrNull(it) }
+                            if (service?.tap(points) != true) {
+                                notify("手势派发失败")
+                            }
                         }
                     }
                 }
@@ -152,7 +176,17 @@ object PlaybackController {
         return stopped || generation != runGeneration
     }
 
+    private fun practiceCueKind(event: MusicEvent): PracticeCueKind {
+        return when {
+            event.durationMs >= LONG_PRESS_THRESHOLD_MS -> PracticeCueKind.LONG_PRESS
+            event.keys.size > 1 -> PracticeCueKind.SIMULTANEOUS
+            else -> PracticeCueKind.SINGLE
+        }
+    }
+
     private fun notify(message: String) {
         main.post { listener?.onStateChanged(message) }
     }
+
+    private const val LONG_PRESS_THRESHOLD_MS = 350L
 }
