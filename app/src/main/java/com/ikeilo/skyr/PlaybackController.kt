@@ -19,6 +19,7 @@ object PlaybackController {
         fun onPlaybackStarted()
         fun onPlaybackPaused()
         fun onPlaybackResumed()
+        fun onPlaybackProgress(positionMs: Long, totalMs: Long)
         fun onPracticeCountdown(seconds: Int)
         fun onPracticePreview(keys: List<Int>, kind: PracticeCueKind, leadTimeMs: Long)
         fun onPracticeCue(keys: List<Int>, kind: PracticeCueKind, durationMs: Long)
@@ -65,16 +66,42 @@ object PlaybackController {
             generation += 1
         }
         val runGeneration = generation
+        val totalProgressMs = totalScaledPlaybackMs(currentSong).coerceAtLeast(1L)
 
         stopped = false
         paused = false
         main.post {
             listener?.onPlaybackStarted()
+            listener?.onPlaybackProgress(0L, totalProgressMs)
             val prefix = if (currentPracticeMode) "开始跟练" else "开始演奏"
             listener?.onStateChanged("$prefix: ${currentSong.name}")
         }
 
         worker = Thread {
+            var progressMs = 0L
+
+            fun reportProgress(force: Boolean = false) {
+                if (shouldStop(runGeneration)) return
+                val clamped = progressMs.coerceIn(0L, totalProgressMs)
+                if (force || clamped == totalProgressMs || clamped == 0L) {
+                    main.post { listener?.onPlaybackProgress(clamped, totalProgressMs) }
+                } else {
+                    main.post { listener?.onPlaybackProgress(clamped, totalProgressMs) }
+                }
+            }
+
+            fun sleepWithProgress(durationMs: Long) {
+                var remaining = durationMs.coerceAtLeast(0L)
+                while (remaining > 0L && !shouldStop(runGeneration)) {
+                    waitIfPaused(runGeneration)
+                    val chunk = minOf(remaining, 40L)
+                    Thread.sleep(chunk)
+                    remaining -= chunk
+                    progressMs += chunk
+                    reportProgress()
+                }
+            }
+
             try {
                 if (currentPracticeMode && !runPracticeCountdown(runGeneration)) {
                     return@Thread
@@ -84,6 +111,7 @@ object PlaybackController {
                     if (shouldStop(runGeneration)) break
                     waitIfPaused(runGeneration)
                     if (event.delayMs > 0L) {
+                        val scaledDelayMs = scaledDelayMs(event.delayMs)
                         val practiceKeys = if (currentPracticeMode && event.keys.isNotEmpty()) {
                             event.keys.filter { it in 0 until 15 }
                         } else {
@@ -92,19 +120,18 @@ object PlaybackController {
                         if (practiceKeys.isNotEmpty()) {
                             val kind = practiceCueKind(currentSong.events, index, practiceKeys)
                             val previewLeadMs = practicePreviewLeadMs(event.delayMs)
-                            val scaledDelayMs = scaledDelayMs(event.delayMs)
                             if (previewLeadMs in 1 until scaledDelayMs) {
-                                sleepUnscaled(scaledDelayMs - previewLeadMs, runGeneration)
+                                sleepWithProgress(scaledDelayMs - previewLeadMs)
                                 if (shouldStop(runGeneration)) break
                                 main.post {
                                     listener?.onPracticePreview(practiceKeys, kind, previewLeadMs)
                                 }
-                                sleepUnscaled(previewLeadMs, runGeneration)
+                                sleepWithProgress(previewLeadMs)
                             } else {
-                                sleepUnscaled(scaledDelayMs, runGeneration)
+                                sleepWithProgress(scaledDelayMs)
                             }
                         } else {
-                            sleepScaled(event.delayMs, runGeneration)
+                            sleepWithProgress(scaledDelayMs)
                         }
                     }
                     if (shouldStop(runGeneration)) break
@@ -125,6 +152,8 @@ object PlaybackController {
                         }
                     }
                 }
+                progressMs = totalProgressMs
+                reportProgress(force = true)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             } finally {
@@ -162,6 +191,11 @@ object PlaybackController {
         stopInternal(notifyUser = true, callbackFinished = true)
     }
 
+    @Deprecated("Use stopCurrent().")
+    fun stop() {
+        stopCurrent()
+    }
+
     private fun stopInternal(notifyUser: Boolean, callbackFinished: Boolean) {
         val oldWorker = synchronized(lock) {
             generation += 1
@@ -173,31 +207,19 @@ object PlaybackController {
         }
         oldWorker?.interrupt()
         if (callbackFinished) {
-            main.post { listener?.onPlaybackFinished(completed = false) }
+            main.post {
+                listener?.onPlaybackProgress(0L, totalScaledPlaybackMs(song).coerceAtLeast(1L))
+                listener?.onPlaybackFinished(completed = false)
+            }
         }
         if (notifyUser) {
             notify("已结束")
         }
     }
 
-    @Deprecated("Use stopCurrent().")
-    fun stop() {
-        stopCurrent()
-    }
-
     private fun waitIfPaused(runGeneration: Int) {
         while (paused && !shouldStop(runGeneration)) {
             Thread.sleep(50L)
-        }
-    }
-
-    private fun sleepScaled(delayMs: Long, runGeneration: Int) {
-        var remaining = scaledDelayMs(delayMs)
-        while (remaining > 0L && !shouldStop(runGeneration)) {
-            waitIfPaused(runGeneration)
-            val chunk = minOf(remaining, 40L)
-            Thread.sleep(chunk)
-            remaining -= chunk
         }
     }
 
@@ -257,6 +279,11 @@ object PlaybackController {
 
     private fun scaledDelayMs(delayMs: Long): Long {
         return (delayMs * (1.0 / speed)).roundToLong().coerceAtLeast(0L)
+    }
+
+    private fun totalScaledPlaybackMs(song: Song?): Long {
+        if (song == null) return 0L
+        return song.events.sumOf { scaledDelayMs(it.delayMs) }
     }
 
     private fun practicePreviewLeadMs(delayMs: Long): Long {

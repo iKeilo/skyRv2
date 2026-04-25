@@ -46,12 +46,14 @@ class OverlayController(
     private val shortcutSettings = VolumeShortcutSettings(context)
 
     private var controls: View? = null
+    private var progressView: View? = null
     private var positionView: View? = null
     private var practiceLegendView: View? = null
     private var authorView: View? = null
     private var songPickerView: View? = null
 
     private var controlsParams: WindowManager.LayoutParams? = null
+    private var progressParams: WindowManager.LayoutParams? = null
     private var positionParams: WindowManager.LayoutParams? = null
     private var practiceLegendParams: WindowManager.LayoutParams? = null
     private var authorParams: WindowManager.LayoutParams? = null
@@ -65,6 +67,9 @@ class OverlayController(
     private var volumeSuppressionButton: Button? = null
     private var songLabel: TextView? = null
     private var positionLabel: TextView? = null
+    private var progressTitleLabel: TextView? = null
+    private var progressValueLabel: TextView? = null
+    private var progressFillView: View? = null
 
     private var positionOverlayLocked = false
     private var practiceMode = false
@@ -72,6 +77,10 @@ class OverlayController(
     private var controlsAnchorX = 20
     private var controlsAnchorY = 80
     private var currentSongMode = preferredSongMode()
+    private var currentUiHideMode = preferredUiHideMode()
+    private var uiHidden = false
+    private var playbackProgressMs = 0L
+    private var playbackTotalMs = 1L
 
     private val practiceCells = mutableListOf<TextView>()
     private val practicePreviewAnimators = mutableMapOf<Int, ValueAnimator>()
@@ -80,7 +89,7 @@ class OverlayController(
     private var speedIndex = 3
     private val uiScaleValues = listOf(0.85f, 1.0f, 1.15f, 1.3f, 1.5f)
     private val uiSizeLabels = listOf("小", "中", "大", "特大", "超大")
-    private var uiSizeIndex = uiPrefs.getInt("uiSizeIndex", 1).coerceIn(uiScaleValues.indices)
+    private var uiSizeIndex = uiPrefs.getInt(KEY_UI_SIZE_INDEX, 1).coerceIn(uiScaleValues.indices)
     private val uiScale: Float
         get() = uiScaleValues[uiSizeIndex]
 
@@ -130,9 +139,11 @@ class OverlayController(
             visibility = View.GONE
         }
         endButton = end
-        val speed = button("1x") {
+        val speed = button("${PlaybackController.speed}x") {
             speedIndex = (speedIndex + 1) % speeds.size
             PlaybackController.speed = speeds[speedIndex]
+            playbackTotalMs = totalProgressForCurrentSong()
+            refreshProgressOverlay()
             (it as Button).text = "${PlaybackController.speed}x"
         }
         val uiSize = button("UI ${uiSizeLabels[uiSizeIndex]}") { cycleUiSize() }
@@ -148,9 +159,11 @@ class OverlayController(
         }
         val exit = button("退出") {
             PlaybackController.stopCurrent()
-            removePositionOverlay()
             removeSongPicker()
+            removeProgressOverlay()
+            removePositionOverlay()
             removeControls()
+            uiHidden = false
         }
         root.addView(songLabel)
         listOf(
@@ -182,6 +195,9 @@ class OverlayController(
         syncVolumeSuppressionButton()
         syncPlaybackControls()
         syncModeControls()
+        if (shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
     }
 
     fun importSong(uri: Uri) {
@@ -198,17 +214,12 @@ class OverlayController(
     }
 
     fun toggleControlsVisibility() {
-        if (controls != null) {
-            controlsParams?.let {
-                controlsAnchorX = it.x
-                controlsAnchorY = it.y
-            }
-            removeSongPicker()
-            removeControls()
-            Toast.makeText(context, "悬浮窗已隐藏", Toast.LENGTH_SHORT).show()
+        if (!uiHidden) {
+            hideUiByMode()
+            Toast.makeText(context, "UI已隐藏", Toast.LENGTH_SHORT).show()
         } else {
-            showControls(controlsAnchorX, controlsAnchorY)
-            Toast.makeText(context, "悬浮窗已显示", Toast.LENGTH_SHORT).show()
+            restoreUi()
+            Toast.makeText(context, "UI已显示", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -230,14 +241,21 @@ class OverlayController(
         syncVolumeSuppressionButton()
     }
 
+    fun setShortcutAction(trigger: VolumeShortcutTrigger, action: VolumeShortcutAction) {
+        shortcutSettings.setAction(trigger, action)
+        SkyAccessibilityService.activeService?.refreshKeyFilterState()
+    }
+
     fun shortcutAction(trigger: VolumeShortcutTrigger): VolumeShortcutAction {
         return shortcutSettings.actionFor(trigger)
     }
 
-    fun cycleShortcutAction(trigger: VolumeShortcutTrigger): VolumeShortcutAction {
-        val next = shortcutSettings.cycleAction(trigger)
-        SkyAccessibilityService.activeService?.refreshKeyFilterState()
-        return next
+    fun uiHideMode(): UiHideMode = currentUiHideMode
+
+    fun cycleUiHideMode(): UiHideMode {
+        currentUiHideMode = UiHideMode.entries[(UiHideMode.entries.indexOf(currentUiHideMode) + 1) % UiHideMode.entries.size]
+        uiPrefs.edit().putString(KEY_UI_HIDE_MODE, currentUiHideMode.storageValue).apply()
+        return currentUiHideMode
     }
 
     override fun onVolumeShortcut(action: VolumeShortcutAction) {
@@ -266,12 +284,14 @@ class OverlayController(
     private fun toggleSongPicker() {
         if (songPickerView != null) {
             removeSongPicker()
-            return
+        } else {
+            if (controls == null && !uiHidden) {
+                showControls(controlsAnchorX, controlsAnchorY)
+            } else if (uiHidden) {
+                restoreUi()
+            }
+            showSongPicker()
         }
-        if (controls == null) {
-            showControls(controlsAnchorX, controlsAnchorY)
-        }
-        showSongPicker()
     }
 
     private fun showSongPicker() {
@@ -347,7 +367,6 @@ class OverlayController(
             orientation = LinearLayout.VERTICAL
         }
         val scroll = ScrollView(context).apply {
-            isFillViewport = false
             addView(list)
         }
 
@@ -359,32 +378,31 @@ class OverlayController(
         fun render(keyword: String) {
             val normalized = keyword.trim().lowercase(Locale.getDefault())
             val activeMode = resolveSongModeForDisplay()
-            val songs = songsForMode(activeMode).filter { ref ->
-                normalized.isBlank() || ref.name.lowercase(Locale.getDefault()).contains(normalized)
+            val songs = songsForMode(activeMode).filter {
+                normalized.isBlank() || it.name.lowercase(Locale.getDefault()).contains(normalized)
             }
             refreshModeButtons(activeMode)
-            val modeLabel = if (activeMode == SongListMode.PLAYLIST) "歌单" else "全部"
-            countLabel.text = "$modeLabel ${songs.size} 首"
+            countLabel.text = "${if (activeMode == SongListMode.PLAYLIST) "歌单" else "全部"} ${songs.size} 首"
             list.removeAllViews()
             if (songs.isEmpty()) {
-                val emptyText = if (activeMode == SongListMode.PLAYLIST) {
+                val text = if (activeMode == SongListMode.PLAYLIST) {
                     "歌单还没有收藏曲目"
                 } else {
                     "没有找到匹配乐谱"
                 }
-                list.addView(emptySongRow(emptyText))
+                list.addView(emptySongRow(text))
                 return
             }
             songs.forEachIndexed { index, ref ->
-                list.addView(songRow(ref, index,
+                list.addView(songRow(
+                    ref = ref,
+                    index = index,
                     onToggleFavorite = {
                         songLibrary.toggleFavorite(ref)
                         refreshCurrentSongUi()
                         render(search.text?.toString().orEmpty())
                     },
-                    action = {
-                        selectSong(ref)
-                    }
+                    action = { selectSong(ref) }
                 ))
             }
         }
@@ -427,6 +445,58 @@ class OverlayController(
         songPickerParams = params
         windowManager.addView(root, params)
         songPickerView = root
+    }
+
+    private fun showProgressOverlay() {
+        if (!shouldShowProgressOverlay()) return
+        if (progressView != null) {
+            refreshProgressOverlay()
+            return
+        }
+        val metrics = context.resources.displayMetrics
+        val width = minOf((metrics.widthPixels * 0.72f).roundToInt(), dp(520))
+
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.argb(158, 12, 18, 19), scaledDp(8).toFloat())
+            setPadding(scaledDp(10), scaledDp(8), scaledDp(10), scaledDp(8))
+        }
+        progressTitleLabel = TextView(context).apply {
+            setTextColor(Color.WHITE)
+            textSize = scaledText(13f)
+            gravity = Gravity.CENTER
+        }
+        val barContainer = FrameLayout(context).apply {
+            background = rounded(Color.argb(80, 255, 255, 255), scaledDp(5).toFloat())
+        }
+        progressFillView = View(context).apply {
+            background = rounded(Color.argb(214, 0, 188, 212), scaledDp(5).toFloat())
+            scaleX = 0f
+            pivotX = 0f
+        }
+        barContainer.addView(progressFillView, FrameLayout.LayoutParams(-1, -1))
+        progressValueLabel = TextView(context).apply {
+            setTextColor(Color.argb(225, 255, 255, 255))
+            textSize = scaledText(11f)
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, scaledDp(4), 0, 0)
+        }
+        root.addView(progressTitleLabel)
+        root.addView(barContainer, LinearLayout.LayoutParams(-1, scaledDp(10)).apply {
+            topMargin = scaledDp(6)
+        })
+        root.addView(progressValueLabel)
+
+        val params = baseParams(touchable = false).apply {
+            this.width = width
+            this.height = WindowManager.LayoutParams.WRAP_CONTENT
+            this.x = ((metrics.widthPixels - width) / 2f).roundToInt()
+            this.y = scaledDp(14)
+        }
+        progressParams = params
+        progressView = root
+        windowManager.addView(root, params)
+        refreshProgressOverlay()
     }
 
     private fun showPositionOverlay(locked: Boolean = false) {
@@ -497,8 +567,14 @@ class OverlayController(
 
     fun onSongSelected(song: Song) {
         PlaybackController.song = song
+        playbackProgressMs = 0L
+        playbackTotalMs = totalProgressForCurrentSong()
         refreshCurrentSongUi()
+        refreshProgressOverlay()
         onSongChanged()
+        if (shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
     }
 
     private fun selectSong(ref: SongRef, closePicker: Boolean = true) {
@@ -596,6 +672,15 @@ class OverlayController(
         songLabel = null
     }
 
+    private fun removeProgressOverlay() {
+        progressView?.let { windowManager.removeView(it) }
+        progressView = null
+        progressParams = null
+        progressTitleLabel = null
+        progressValueLabel = null
+        progressFillView = null
+    }
+
     private fun removePracticeLegend() {
         practiceLegendView?.let { windowManager.removeView(it) }
         practiceLegendView = null
@@ -610,16 +695,19 @@ class OverlayController(
 
     private fun cycleUiSize() {
         val wasPickerOpen = songPickerView != null
-        val wasPracticeOverlayOpen = practiceMode && positionView != null
+        val wasPracticeOverlayOpen = positionOverlayLocked && positionView != null
         uiSizeIndex = (uiSizeIndex + 1) % uiScaleValues.size
-        uiPrefs.edit().putInt("uiSizeIndex", uiSizeIndex).apply()
-
+        uiPrefs.edit().putInt(KEY_UI_SIZE_INDEX, uiSizeIndex).apply()
+        removeSongPicker()
+        removeProgressOverlay()
         if (wasPracticeOverlayOpen) {
             removePositionOverlay()
         }
-        removeSongPicker()
         removeControls()
         showControls(controlsAnchorX, controlsAnchorY)
+        if (PlaybackController.song != null && shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
         if (wasPracticeOverlayOpen) {
             showPracticeOverlay()
         }
@@ -676,6 +764,31 @@ class OverlayController(
         showPositionOverlay(locked = true)
     }
 
+    private fun hideUiByMode() {
+        uiHidden = true
+        removeSongPicker()
+        removeControls()
+        when (currentUiHideMode) {
+            UiHideMode.MENU_ONLY -> Unit
+            UiHideMode.MENU_AND_PROGRESS -> removeProgressOverlay()
+            UiHideMode.ALL -> {
+                removeProgressOverlay()
+                removePositionOverlay()
+            }
+        }
+    }
+
+    private fun restoreUi() {
+        uiHidden = false
+        showControls(controlsAnchorX, controlsAnchorY)
+        if (PlaybackController.song != null && shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
+        if (currentUiHideMode == UiHideMode.ALL && practiceMode) {
+            showPracticeOverlay()
+        }
+    }
+
     private fun syncPlaybackControls() {
         val pause = pauseButton ?: return
         val end = endButton ?: return
@@ -710,14 +823,11 @@ class OverlayController(
     private fun refreshCurrentSongUi() {
         songLabel?.text = currentSongLabel()
         favoriteButton?.text = if (songLibrary.isFavorite(PlaybackController.songRef)) "取消收藏" else "收藏"
+        refreshProgressOverlay()
     }
 
     private fun syncVolumeSuppressionButton() {
-        volumeSuppressionButton?.text = if (shortcutSettings.isVolumeSuppressionEnabled()) {
-            "音量抑制 开"
-        } else {
-            "音量抑制 关"
-        }
+        volumeSuppressionButton?.text = if (shortcutSettings.isVolumeSuppressionEnabled()) "音量抑制 开" else "音量抑制 关"
     }
 
     private fun currentSongLabel(): String {
@@ -726,11 +836,37 @@ class OverlayController(
         return "乐谱: $current [$modeLabel]"
     }
 
+    private fun shouldShowProgressOverlay(): Boolean {
+        if (PlaybackController.song == null) return false
+        if (!uiHidden) return true
+        return currentUiHideMode == UiHideMode.MENU_ONLY
+    }
+
+    private fun refreshProgressOverlay() {
+        val title = PlaybackController.song?.name ?: return
+        if (progressView == null) return
+        progressTitleLabel?.text = "当前演奏: $title"
+        val total = playbackTotalMs.coerceAtLeast(1L)
+        val progress = playbackProgressMs.coerceIn(0L, total)
+        val percent = if (total <= 0L) 0f else progress.toFloat() / total.toFloat()
+        progressValueLabel?.text = "${formatDuration(progress)} / ${formatDuration(total)}  ${(percent * 100f).roundToInt()}%"
+        progressFillView?.post {
+            progressFillView?.pivotX = 0f
+            progressFillView?.scaleX = percent.coerceIn(0f, 1f)
+        }
+    }
+
     override fun onStateChanged(state: String) {
         Toast.makeText(context, state, Toast.LENGTH_SHORT).show()
     }
 
     override fun onPlaybackStarted() {
+        playbackProgressMs = 0L
+        playbackTotalMs = totalProgressForCurrentSong()
+        if (shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
+        refreshProgressOverlay()
         syncPlaybackControls()
     }
 
@@ -740,6 +876,15 @@ class OverlayController(
 
     override fun onPlaybackResumed() {
         syncPlaybackControls()
+    }
+
+    override fun onPlaybackProgress(positionMs: Long, totalMs: Long) {
+        playbackProgressMs = positionMs
+        playbackTotalMs = totalMs.coerceAtLeast(1L)
+        if (shouldShowProgressOverlay()) {
+            showProgressOverlay()
+        }
+        refreshProgressOverlay()
     }
 
     override fun onPlaybackFinished(completed: Boolean) {
@@ -752,8 +897,12 @@ class OverlayController(
             }
         }
         if (completed) {
+            playbackProgressMs = playbackTotalMs
             Toast.makeText(context, "演奏完成", Toast.LENGTH_LONG).show()
+        } else {
+            playbackProgressMs = 0L
         }
+        refreshProgressOverlay()
     }
 
     override fun onPracticeCountdown(seconds: Int) {
@@ -853,7 +1002,7 @@ class OverlayController(
             addView(TextView(context).apply {
                 text = if (isFavorite) "★" else "☆"
                 textSize = scaledText(18f)
-                setTextColor(if (isFavorite) Color.rgb(255, 215, 0) else Color.argb(200, 255, 255, 255))
+                setTextColor(if (isFavorite) Color.rgb(255, 215, 0) else Color.argb(210, 255, 255, 255))
                 gravity = Gravity.CENTER
                 setPadding(scaledDp(10), 0, scaledDp(10), 0)
                 setOnClickListener { onToggleFavorite() }
@@ -931,8 +1080,8 @@ class OverlayController(
         removePracticeLegend()
         val metrics = context.resources.displayMetrics
         val overlayWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val width = scaledDp(108)
-        val height = scaledDp(78)
+        val width = scaledDp(120)
+        val height = scaledDp(88)
         val margin = scaledDp(8)
         val view = practiceLegend()
         val params = baseParams(touchable = false).apply {
@@ -941,8 +1090,7 @@ class OverlayController(
             this.x = (bounds.x + bounds.width + margin)
                 .coerceAtMost(overlayWidth - width - margin)
                 .coerceAtLeast(margin)
-            this.y = (bounds.y + (bounds.height - height) / 2)
-                .coerceAtLeast(margin)
+            this.y = (bounds.y + (bounds.height - height) / 2).coerceAtLeast(margin)
         }
         practiceLegendParams = params
         practiceLegendView = view
@@ -1003,20 +1151,16 @@ class OverlayController(
         practicePreviewAnimators.remove(key)?.cancel()
         resetPracticeCell(cell)
         val targetColor = defaultPracticeCellColor()
-        val duration = leadTimeMs.coerceIn(180L, 760L)
+        val argb = ArgbEvaluator()
         val animator = ValueAnimator.ofFloat(0f, 1f).apply {
-            this.duration = duration
+            duration = leadTimeMs.coerceIn(180L, 760L)
             addUpdateListener { animation ->
                 val progress = animation.animatedFraction
-                val scale = 1.9f - (0.9f * progress)
-                val alpha = 0.78f - (0.58f * progress)
-                cell.scaleX = scale
-                cell.scaleY = scale
-                cell.alpha = alpha.coerceIn(0.18f, 1f)
+                cell.scaleX = 1.9f - (0.9f * progress)
+                cell.scaleY = 1.9f - (0.9f * progress)
+                cell.alpha = (0.78f - (0.58f * progress)).coerceIn(0.18f, 1f)
                 cell.translationZ = scaledDp(10).toFloat() * (1f - progress)
-                cell.setBackgroundColor(
-                    ArgbEvaluator().evaluate(progress, color, targetColor) as Int
-                )
+                cell.setBackgroundColor(argb.evaluate(progress, color, targetColor) as Int)
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -1040,17 +1184,26 @@ class OverlayController(
         practiceFadeAnimators.remove(key)?.cancel()
         resetPracticeCell(cell)
         cell.setBackgroundColor(color)
-
         val fadeMs = (visibleMs * 0.35).roundToLong().coerceIn(180L, 900L)
         val holdMs = (visibleMs - fadeMs).coerceAtLeast(0L)
         val targetColor = defaultPracticeCellColor()
+        val argb = ArgbEvaluator()
         cell.postDelayed({
             if (practiceCueVersion != version) return@postDelayed
-            val animator = ValueAnimator.ofObject(ArgbEvaluator(), color, targetColor).apply {
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = fadeMs
                 addUpdateListener { animation ->
-                    cell.setBackgroundColor(animation.animatedValue as Int)
+                    cell.setBackgroundColor(argb.evaluate(animation.animatedFraction, color, targetColor) as Int)
                 }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        practiceFadeAnimators.remove(key)
+                    }
+
+                    override fun onAnimationCancel(animation: Animator) {
+                        practiceFadeAnimators.remove(key)
+                    }
+                })
             }
             practiceFadeAnimators[key] = animator
             animator.start()
@@ -1109,7 +1262,6 @@ class OverlayController(
     private fun practiceOverlayBounds(screenWidth: Int, screenHeight: Int): OverlayBounds {
         val points = PlaybackController.keyPoints
         if (points.size != 15) return defaultPositionBounds(screenWidth, screenHeight)
-
         val minX = points.minOf { it.x }
         val maxX = points.maxOf { it.x }
         val minY = points.minOf { it.y }
@@ -1117,7 +1269,6 @@ class OverlayController(
         val cellW = ((maxX - minX) / 4f).takeIf { it > 0f }
         val cellH = ((maxY - minY) / 2f).takeIf { it > 0f }
         if (cellW == null || cellH == null) return defaultPositionBounds(screenWidth, screenHeight)
-
         return OverlayBounds(
             width = (cellW * 5f).roundToInt(),
             height = (cellH * 3f).roundToInt(),
@@ -1221,8 +1372,25 @@ class OverlayController(
         }
     }
 
+    private fun preferredUiHideMode(): UiHideMode {
+        return UiHideMode.fromStorage(uiPrefs.getString(KEY_UI_HIDE_MODE, null))
+    }
+
     private fun saveSongMode(mode: SongListMode) {
         uiPrefs.edit().putString(KEY_SONG_MODE, mode.name).apply()
+    }
+
+    private fun totalProgressForCurrentSong(): Long {
+        val song = PlaybackController.song ?: return 1L
+        return song.events.sumOf { ((it.delayMs * (1.0 / PlaybackController.speed)).roundToLong()).coerceAtLeast(0L) }
+            .coerceAtLeast(1L)
+    }
+
+    private fun formatDuration(durationMs: Long): String {
+        val totalSeconds = (durationMs / 1000L).coerceAtLeast(0L)
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        return String.format(Locale.US, "%02d:%02d", minutes, seconds)
     }
 
     private fun dp(value: Int): Int {
@@ -1247,5 +1415,7 @@ class OverlayController(
 
     private companion object {
         const val KEY_SONG_MODE = "song_mode"
+        const val KEY_UI_HIDE_MODE = "ui_hide_mode"
+        const val KEY_UI_SIZE_INDEX = "uiSizeIndex"
     }
 }

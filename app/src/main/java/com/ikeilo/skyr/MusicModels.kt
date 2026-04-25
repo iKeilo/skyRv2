@@ -23,6 +23,18 @@ enum class SongListMode {
     ALL
 }
 
+enum class UiHideMode(val storageValue: String, val label: String) {
+    MENU_ONLY("menu_only", "关闭菜单UI"),
+    MENU_AND_PROGRESS("menu_and_progress", "关闭菜单和进度条UI"),
+    ALL("all", "关闭所有UI");
+
+    companion object {
+        fun fromStorage(value: String?): UiHideMode {
+            return entries.firstOrNull { it.storageValue == value } ?: MENU_ONLY
+        }
+    }
+}
+
 data class SongRef(
     val id: String,
     val name: String,
