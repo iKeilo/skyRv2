@@ -1,5 +1,7 @@
 package com.ikeilo.skyr
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
@@ -72,6 +74,7 @@ class OverlayController(
     private var currentSongMode = preferredSongMode()
 
     private val practiceCells = mutableListOf<TextView>()
+    private val practicePreviewAnimators = mutableMapOf<Int, ValueAnimator>()
     private val practiceFadeAnimators = mutableMapOf<Int, ValueAnimator>()
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
@@ -764,6 +767,21 @@ class OverlayController(
         }
     }
 
+    override fun onPracticePreview(keys: List<Int>, kind: PlaybackController.PracticeCueKind, leadTimeMs: Long) {
+        if (!practiceMode) return
+        if (positionView == null || !positionOverlayLocked) {
+            showPracticeOverlay()
+        }
+        positionLabel?.text = ""
+        val previewColor = when (kind) {
+            PlaybackController.PracticeCueKind.SINGLE -> Color.argb(126, 42, 214, 116)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS -> Color.argb(132, 33, 150, 243)
+            PlaybackController.PracticeCueKind.DOUBLE -> Color.argb(156, 255, 255, 255)
+            PlaybackController.PracticeCueKind.SIMULTANEOUS_DOUBLE -> Color.argb(136, 186, 85, 211)
+        }
+        keys.forEach { key -> showPracticePreview(key, previewColor, leadTimeMs) }
+    }
+
     override fun onPracticeCue(keys: List<Int>, kind: PlaybackController.PracticeCueKind, durationMs: Long) {
         if (!practiceMode) return
         if (positionView == null || !positionOverlayLocked) {
@@ -964,14 +982,63 @@ class OverlayController(
         if (incrementVersion) {
             practiceCueVersion += 1
         }
+        practicePreviewAnimators.values.forEach { it.cancel() }
+        practicePreviewAnimators.clear()
         practiceFadeAnimators.values.forEach { it.cancel() }
         practiceFadeAnimators.clear()
-        practiceCells.forEach { it.setBackgroundColor(defaultPracticeCellColor()) }
+        practiceCells.forEach(::resetPracticeCell)
+    }
+
+    private fun resetPracticeCell(cell: TextView) {
+        cell.animate().cancel()
+        cell.scaleX = 1f
+        cell.scaleY = 1f
+        cell.alpha = 1f
+        cell.translationZ = 0f
+        cell.setBackgroundColor(defaultPracticeCellColor())
+    }
+
+    private fun showPracticePreview(key: Int, color: Int, leadTimeMs: Long) {
+        val cell = practiceCells.getOrNull(key) ?: return
+        practicePreviewAnimators.remove(key)?.cancel()
+        resetPracticeCell(cell)
+        val targetColor = defaultPracticeCellColor()
+        val duration = leadTimeMs.coerceIn(180L, 760L)
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            addUpdateListener { animation ->
+                val progress = animation.animatedFraction
+                val scale = 1.9f - (0.9f * progress)
+                val alpha = 0.78f - (0.58f * progress)
+                cell.scaleX = scale
+                cell.scaleY = scale
+                cell.alpha = alpha.coerceIn(0.18f, 1f)
+                cell.translationZ = scaledDp(10).toFloat() * (1f - progress)
+                cell.setBackgroundColor(
+                    ArgbEvaluator().evaluate(progress, color, targetColor) as Int
+                )
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    practicePreviewAnimators.remove(key)
+                    resetPracticeCell(cell)
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    practicePreviewAnimators.remove(key)
+                    resetPracticeCell(cell)
+                }
+            })
+        }
+        practicePreviewAnimators[key] = animator
+        animator.start()
     }
 
     private fun showPracticeCell(key: Int, color: Int, visibleMs: Long, version: Long) {
         val cell = practiceCells.getOrNull(key) ?: return
+        practicePreviewAnimators.remove(key)?.cancel()
         practiceFadeAnimators.remove(key)?.cancel()
+        resetPracticeCell(cell)
         cell.setBackgroundColor(color)
 
         val fadeMs = (visibleMs * 0.35).roundToLong().coerceIn(180L, 900L)

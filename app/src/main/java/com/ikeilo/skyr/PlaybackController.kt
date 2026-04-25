@@ -20,6 +20,7 @@ object PlaybackController {
         fun onPlaybackPaused()
         fun onPlaybackResumed()
         fun onPracticeCountdown(seconds: Int)
+        fun onPracticePreview(keys: List<Int>, kind: PracticeCueKind, leadTimeMs: Long)
         fun onPracticeCue(keys: List<Int>, kind: PracticeCueKind, durationMs: Long)
     }
 
@@ -83,7 +84,28 @@ object PlaybackController {
                     if (shouldStop(runGeneration)) break
                     waitIfPaused(runGeneration)
                     if (event.delayMs > 0L) {
-                        sleepScaled(event.delayMs, runGeneration)
+                        val practiceKeys = if (currentPracticeMode && event.keys.isNotEmpty()) {
+                            event.keys.filter { it in 0 until 15 }
+                        } else {
+                            emptyList()
+                        }
+                        if (practiceKeys.isNotEmpty()) {
+                            val kind = practiceCueKind(currentSong.events, index, practiceKeys)
+                            val previewLeadMs = practicePreviewLeadMs(event.delayMs)
+                            val scaledDelayMs = scaledDelayMs(event.delayMs)
+                            if (previewLeadMs in 1 until scaledDelayMs) {
+                                sleepUnscaled(scaledDelayMs - previewLeadMs, runGeneration)
+                                if (shouldStop(runGeneration)) break
+                                main.post {
+                                    listener?.onPracticePreview(practiceKeys, kind, previewLeadMs)
+                                }
+                                sleepUnscaled(previewLeadMs, runGeneration)
+                            } else {
+                                sleepUnscaled(scaledDelayMs, runGeneration)
+                            }
+                        } else {
+                            sleepScaled(event.delayMs, runGeneration)
+                        }
                     }
                     if (shouldStop(runGeneration)) break
                     if (event.keys.isNotEmpty()) {
@@ -170,7 +192,7 @@ object PlaybackController {
     }
 
     private fun sleepScaled(delayMs: Long, runGeneration: Int) {
-        var remaining = (delayMs * (1.0 / speed)).roundToLong().coerceAtLeast(0L)
+        var remaining = scaledDelayMs(delayMs)
         while (remaining > 0L && !shouldStop(runGeneration)) {
             waitIfPaused(runGeneration)
             val chunk = minOf(remaining, 40L)
@@ -233,5 +255,20 @@ object PlaybackController {
         main.post { listener?.onStateChanged(message) }
     }
 
+    private fun scaledDelayMs(delayMs: Long): Long {
+        return (delayMs * (1.0 / speed)).roundToLong().coerceAtLeast(0L)
+    }
+
+    private fun practicePreviewLeadMs(delayMs: Long): Long {
+        val scaledDelay = scaledDelayMs(delayMs)
+        if (scaledDelay < MIN_PREVIEW_GAP_MS) return 0L
+        return (scaledDelay * PREVIEW_LEAD_RATIO).roundToLong()
+            .coerceIn(MIN_PREVIEW_GAP_MS, MAX_PREVIEW_GAP_MS)
+            .coerceAtMost(scaledDelay - 1L)
+    }
+
     private const val DOUBLE_TAP_WINDOW_MS = 320L
+    private const val MIN_PREVIEW_GAP_MS = 220L
+    private const val MAX_PREVIEW_GAP_MS = 680L
+    private const val PREVIEW_LEAD_RATIO = 0.42
 }
