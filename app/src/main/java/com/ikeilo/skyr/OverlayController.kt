@@ -7,13 +7,14 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
-import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -35,32 +36,43 @@ class OverlayController(
     private val context: Context,
     private val onSongChanged: () -> Unit,
     private val onPickExternalSong: () -> Unit
-) : PlaybackController.Listener {
+) : PlaybackController.Listener, VolumeShortcutManager.Dispatcher {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val positionStore = PositionStore(context)
     private val uiPrefs = context.getSharedPreferences("overlay_ui", Context.MODE_PRIVATE)
+    private val songLibrary = SongLibrary(context)
+    private val shortcutSettings = VolumeShortcutSettings(context)
+
     private var controls: View? = null
     private var positionView: View? = null
     private var practiceLegendView: View? = null
     private var authorView: View? = null
     private var songPickerView: View? = null
+
     private var controlsParams: WindowManager.LayoutParams? = null
     private var positionParams: WindowManager.LayoutParams? = null
     private var practiceLegendParams: WindowManager.LayoutParams? = null
     private var authorParams: WindowManager.LayoutParams? = null
     private var songPickerParams: WindowManager.LayoutParams? = null
+
     private var pauseButton: Button? = null
     private var endButton: Button? = null
     private var practiceButton: Button? = null
     private var positionButton: Button? = null
+    private var favoriteButton: Button? = null
+    private var volumeSuppressionButton: Button? = null
     private var songLabel: TextView? = null
     private var positionLabel: TextView? = null
+
     private var positionOverlayLocked = false
     private var practiceMode = false
     private var practiceCueVersion = 0L
+    private var controlsAnchorX = 20
+    private var controlsAnchorY = 80
+    private var currentSongMode = preferredSongMode()
+
     private val practiceCells = mutableListOf<TextView>()
     private val practiceFadeAnimators = mutableMapOf<Int, ValueAnimator>()
-    private val bundledSongs: List<String> by lazy { loadBundledSongs() }
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
     private val uiScaleValues = listOf(0.85f, 1.0f, 1.15f, 1.3f, 1.5f)
@@ -72,19 +84,25 @@ class OverlayController(
     init {
         PlaybackController.listener = this
         PlaybackController.practiceMode = practiceMode
+        VolumeShortcutManager.dispatcher = this
         positionStore.load()?.let { PlaybackController.keyPoints = it.points }
     }
 
     fun showControls(x: Int = 20, y: Int = 80) {
         PlaybackController.listener = this
+        VolumeShortcutManager.dispatcher = this
         if (!Settings.canDrawOverlays(context)) {
             Toast.makeText(context, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
             return
         }
         if (controls != null) {
             syncPlaybackControls()
+            refreshCurrentSongUi()
+            syncVolumeSuppressionButton()
             return
         }
+        controlsAnchorX = x
+        controlsAnchorY = y
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -92,7 +110,7 @@ class OverlayController(
             setPadding(scaledDp(4), scaledDp(4), scaledDp(4), scaledDp(4))
         }
         songLabel = TextView(context).apply {
-            text = "乐谱: ${PlaybackController.song?.name ?: "未选择"}"
+            text = currentSongLabel()
             setTextColor(Color.WHITE)
             textSize = scaledText(11f)
             maxLines = 1
@@ -100,6 +118,7 @@ class OverlayController(
         }
         val pick = button("选曲") { showSongPicker() }
         val play = button("开始") { PlaybackController.start() }
+        favoriteButton = button("收藏") { toggleFavoriteCurrentSong() }
         practiceButton = button("跟练关") { togglePracticeMode() }
         pauseButton = button("暂停") { PlaybackController.pauseOrResume() }.apply {
             visibility = View.GONE
@@ -114,6 +133,7 @@ class OverlayController(
             (it as Button).text = "${PlaybackController.speed}x"
         }
         val uiSize = button("UI ${uiSizeLabels[uiSizeIndex]}") { cycleUiSize() }
+        volumeSuppressionButton = button("音量抑制") { toggleVolumeSuppression() }
         positionButton = button("定位") {
             if (practiceMode) {
                 showPracticeOverlay()
@@ -130,7 +150,19 @@ class OverlayController(
             removeControls()
         }
         root.addView(songLabel)
-        listOf(pick, play, practiceButton, pauseButton, end, speed, uiSize, positionButton, exit).forEach { root.addView(it) }
+        listOf(
+            pick,
+            play,
+            favoriteButton,
+            practiceButton,
+            pauseButton,
+            end,
+            speed,
+            uiSize,
+            volumeSuppressionButton,
+            positionButton,
+            exit
+        ).forEach { button -> button?.let(root::addView) }
         makeDraggable(root) { controlsParams }
 
         val params = baseParams().apply {
@@ -143,8 +175,100 @@ class OverlayController(
         windowManager.addView(root, params)
         controls = root
         showAuthorWatermark()
+        refreshCurrentSongUi()
+        syncVolumeSuppressionButton()
         syncPlaybackControls()
         syncModeControls()
+    }
+
+    fun importSong(uri: Uri) {
+        try {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw IllegalArgumentException("无法读取文件")
+            val fileName = uri.lastPathSegment?.substringAfterLast("/") ?: "Imported.txt"
+            val song = MusicParser.parse(fileName, MusicParser.decode(bytes))
+            val songRef = songLibrary.registerImportedSong(uri, song.name)
+            setSelectedSong(songRef, song, closePicker = true, toastMessage = "已导入乐谱: ${song.name}")
+        } catch (error: Exception) {
+            Toast.makeText(context, error.message ?: "读取乐谱失败", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun toggleControlsVisibility() {
+        if (controls != null) {
+            controlsParams?.let {
+                controlsAnchorX = it.x
+                controlsAnchorY = it.y
+            }
+            removeSongPicker()
+            removeControls()
+            Toast.makeText(context, "悬浮窗已隐藏", Toast.LENGTH_SHORT).show()
+        } else {
+            showControls(controlsAnchorX, controlsAnchorY)
+            Toast.makeText(context, "悬浮窗已显示", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun toggleCurrentSongFavoriteFromApp() {
+        toggleFavoriteCurrentSong()
+    }
+
+    fun isCurrentSongFavorite(): Boolean {
+        return songLibrary.isFavorite(PlaybackController.songRef)
+    }
+
+    fun isVolumeSuppressionEnabled(): Boolean {
+        return shortcutSettings.isVolumeSuppressionEnabled()
+    }
+
+    fun setVolumeSuppressionEnabled(enabled: Boolean) {
+        shortcutSettings.setVolumeSuppressionEnabled(enabled)
+        SkyAccessibilityService.activeService?.refreshKeyFilterState()
+        syncVolumeSuppressionButton()
+    }
+
+    fun shortcutAction(trigger: VolumeShortcutTrigger): VolumeShortcutAction {
+        return shortcutSettings.actionFor(trigger)
+    }
+
+    fun cycleShortcutAction(trigger: VolumeShortcutTrigger): VolumeShortcutAction {
+        val next = shortcutSettings.cycleAction(trigger)
+        SkyAccessibilityService.activeService?.refreshKeyFilterState()
+        return next
+    }
+
+    override fun onVolumeShortcut(action: VolumeShortcutAction) {
+        when (action) {
+            VolumeShortcutAction.NONE -> Unit
+            VolumeShortcutAction.TOGGLE_UI -> toggleControlsVisibility()
+            VolumeShortcutAction.PREVIOUS_SONG -> navigateSong(-1)
+            VolumeShortcutAction.NEXT_SONG -> navigateSong(1)
+            VolumeShortcutAction.START_OR_RESTART -> PlaybackController.start()
+            VolumeShortcutAction.PAUSE_OR_RESUME -> {
+                if (PlaybackController.isPlaying || PlaybackController.isPaused) {
+                    PlaybackController.pauseOrResume()
+                } else {
+                    PlaybackController.start()
+                }
+            }
+            VolumeShortcutAction.STOP -> {
+                if (PlaybackController.isPlaying || PlaybackController.isPaused) {
+                    PlaybackController.stopCurrent()
+                }
+            }
+            VolumeShortcutAction.TOGGLE_SONG_PICKER -> toggleSongPicker()
+        }
+    }
+
+    private fun toggleSongPicker() {
+        if (songPickerView != null) {
+            removeSongPicker()
+            return
+        }
+        if (controls == null) {
+            showControls(controlsAnchorX, controlsAnchorY)
+        }
+        showSongPicker()
     }
 
     private fun showSongPicker() {
@@ -156,7 +280,7 @@ class OverlayController(
 
         val metrics = context.resources.displayMetrics
         val width = (metrics.widthPixels * 0.86f).roundToInt()
-        val height = (metrics.heightPixels * 0.66f).roundToInt()
+        val height = (metrics.heightPixels * 0.68f).roundToInt()
         val x = ((metrics.widthPixels - width) / 2f).roundToInt()
         val y = (metrics.heightPixels * 0.12f).roundToInt()
 
@@ -180,12 +304,27 @@ class OverlayController(
             removeSongPicker()
             onPickExternalSong()
         }
-        val closeButton = button("×") { removeSongPicker() }.apply {
+        val closeButton = button("关闭") { removeSongPicker() }.apply {
             minWidth = scaledDp(44)
         }
         titleBar.addView(title, LinearLayout.LayoutParams(0, scaledDp(42), 1f))
         titleBar.addView(importButton)
         titleBar.addView(closeButton)
+
+        val modeBar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val playlistModeButton = button("歌单") {
+            currentSongMode = SongListMode.PLAYLIST
+            saveSongMode(currentSongMode)
+        }
+        val allModeButton = button("全部") {
+            currentSongMode = SongListMode.ALL
+            saveSongMode(currentSongMode)
+        }
+        modeBar.addView(playlistModeButton)
+        modeBar.addView(allModeButton)
 
         val search = EditText(context).apply {
             hint = "搜索乐谱"
@@ -209,26 +348,53 @@ class OverlayController(
             addView(list)
         }
 
+        fun refreshModeButtons(activeMode: SongListMode) {
+            styleModeButton(playlistModeButton, activeMode == SongListMode.PLAYLIST)
+            styleModeButton(allModeButton, activeMode == SongListMode.ALL)
+        }
+
         fun render(keyword: String) {
             val normalized = keyword.trim().lowercase(Locale.getDefault())
-            val songs = if (normalized.isEmpty()) {
-                bundledSongs
-            } else {
-                bundledSongs.filter {
-                    it.removeSuffix(".txt").lowercase(Locale.getDefault()).contains(normalized)
-                }
+            val activeMode = resolveSongModeForDisplay()
+            val songs = songsForMode(activeMode).filter { ref ->
+                normalized.isBlank() || ref.name.lowercase(Locale.getDefault()).contains(normalized)
             }
-            countLabel.text = "共 ${songs.size} 首"
+            refreshModeButtons(activeMode)
+            val modeLabel = if (activeMode == SongListMode.PLAYLIST) "歌单" else "全部"
+            countLabel.text = "$modeLabel ${songs.size} 首"
             list.removeAllViews()
             if (songs.isEmpty()) {
-                list.addView(songRow("没有找到匹配乐谱", enabled = false))
+                val emptyText = if (activeMode == SongListMode.PLAYLIST) {
+                    "歌单还没有收藏曲目"
+                } else {
+                    "没有找到匹配乐谱"
+                }
+                list.addView(emptySongRow(emptyText))
                 return
             }
-            songs.forEachIndexed { index, assetName ->
-                list.addView(songRow(assetName.removeSuffix(".txt"), enabled = true, index = index) {
-                    selectBundledSong(assetName)
-                })
+            songs.forEachIndexed { index, ref ->
+                list.addView(songRow(ref, index,
+                    onToggleFavorite = {
+                        songLibrary.toggleFavorite(ref)
+                        refreshCurrentSongUi()
+                        render(search.text?.toString().orEmpty())
+                    },
+                    action = {
+                        selectSong(ref)
+                    }
+                ))
             }
+        }
+
+        playlistModeButton.setOnClickListener {
+            currentSongMode = SongListMode.PLAYLIST
+            saveSongMode(currentSongMode)
+            render(search.text?.toString().orEmpty())
+        }
+        allModeButton.setOnClickListener {
+            currentSongMode = SongListMode.ALL
+            saveSongMode(currentSongMode)
+            render(search.text?.toString().orEmpty())
         }
 
         search.addTextChangedListener(object : TextWatcher {
@@ -240,6 +406,7 @@ class OverlayController(
         })
 
         root.addView(titleBar)
+        root.addView(modeBar)
         root.addView(search, LinearLayout.LayoutParams(-1, scaledDp(42)).apply {
             setMargins(0, scaledDp(4), 0, 0)
         })
@@ -262,10 +429,11 @@ class OverlayController(
     private fun showPositionOverlay(locked: Boolean = false) {
         if (positionView != null) return
         val metrics = context.resources.displayMetrics
-        val bounds = if (locked) practiceOverlayBounds(metrics.widthPixels, metrics.heightPixels) else defaultPositionBounds(
-            metrics.widthPixels,
-            metrics.heightPixels
-        )
+        val bounds = if (locked) {
+            practiceOverlayBounds(metrics.widthPixels, metrics.heightPixels)
+        } else {
+            defaultPositionBounds(metrics.widthPixels, metrics.heightPixels)
+        }
         positionOverlayLocked = locked
         practiceCells.clear()
 
@@ -325,21 +493,51 @@ class OverlayController(
     }
 
     fun onSongSelected(song: Song) {
-        songLabel?.text = "乐谱: ${song.name}"
+        PlaybackController.song = song
+        refreshCurrentSongUi()
+        onSongChanged()
     }
 
-    private fun selectBundledSong(assetName: String) {
+    private fun selectSong(ref: SongRef, closePicker: Boolean = true) {
         try {
-            val bytes = context.assets.open("music/$assetName").use { it.readBytes() }
-            val song = MusicParser.parse(assetName, MusicParser.decode(bytes))
-            PlaybackController.song = song
-            onSongSelected(song)
-            onSongChanged()
-            removeSongPicker()
-            Toast.makeText(context, "已读取乐谱: ${song.name}", Toast.LENGTH_SHORT).show()
+            val song = songLibrary.loadSong(ref)
+            setSelectedSong(ref, song, closePicker = closePicker, toastMessage = "已读取乐谱: ${song.name}")
         } catch (error: Exception) {
             Toast.makeText(context, error.message ?: "读取乐谱失败", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun setSelectedSong(ref: SongRef, song: Song, closePicker: Boolean, toastMessage: String? = null) {
+        PlaybackController.songRef = ref
+        onSongSelected(song)
+        if (closePicker) {
+            removeSongPicker()
+        }
+        toastMessage?.let { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun navigateSong(step: Int) {
+        val songs = songsForNavigation()
+        if (songs.isEmpty()) {
+            Toast.makeText(context, "当前列表没有可切换的曲目", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val currentId = PlaybackController.songRef?.id
+        val currentIndex = songs.indexOfFirst { it.id == currentId }
+        val target = if (currentIndex >= 0) {
+            songs[(currentIndex + step + songs.size) % songs.size]
+        } else if (step >= 0) {
+            songs.first()
+        } else {
+            songs.last()
+        }
+        selectSong(target, closePicker = false)
+        Toast.makeText(context, if (step > 0) "已切到下一曲" else "已切到上一曲", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun songsForNavigation(): List<SongRef> {
+        val preferred = songsForMode(resolveSongModeForDisplay())
+        return if (preferred.isNotEmpty()) preferred else songLibrary.songs(SongListMode.ALL)
     }
 
     private fun finishPosition() {
@@ -378,10 +576,21 @@ class OverlayController(
     }
 
     private fun removeControls() {
+        controlsParams?.let {
+            controlsAnchorX = it.x
+            controlsAnchorY = it.y
+        }
         controls?.let { windowManager.removeView(it) }
         removeAuthorWatermark()
         controls = null
         controlsParams = null
+        pauseButton = null
+        endButton = null
+        practiceButton = null
+        positionButton = null
+        favoriteButton = null
+        volumeSuppressionButton = null
+        songLabel = null
     }
 
     private fun removePracticeLegend() {
@@ -397,8 +606,6 @@ class OverlayController(
     }
 
     private fun cycleUiSize() {
-        val currentX = controlsParams?.x ?: 20
-        val currentY = controlsParams?.y ?: 80
         val wasPickerOpen = songPickerView != null
         val wasPracticeOverlayOpen = practiceMode && positionView != null
         uiSizeIndex = (uiSizeIndex + 1) % uiScaleValues.size
@@ -409,7 +616,7 @@ class OverlayController(
         }
         removeSongPicker()
         removeControls()
-        showControls(currentX, currentY)
+        showControls(controlsAnchorX, controlsAnchorY)
         if (wasPracticeOverlayOpen) {
             showPracticeOverlay()
         }
@@ -435,6 +642,29 @@ class OverlayController(
         }
         syncModeControls()
         syncPlaybackControls()
+    }
+
+    private fun toggleFavoriteCurrentSong() {
+        val ref = PlaybackController.songRef
+        if (ref == null) {
+            Toast.makeText(context, "请先选择乐谱", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val nowFavorite = songLibrary.toggleFavorite(ref)
+        if (currentSongMode == SongListMode.PLAYLIST && songLibrary.favoriteCount() == 0) {
+            currentSongMode = SongListMode.ALL
+            saveSongMode(currentSongMode)
+        }
+        refreshCurrentSongUi()
+        Toast.makeText(context, if (nowFavorite) "已加入收藏歌单" else "已移出收藏歌单", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun toggleVolumeSuppression() {
+        val enabled = !shortcutSettings.isVolumeSuppressionEnabled()
+        shortcutSettings.setVolumeSuppressionEnabled(enabled)
+        SkyAccessibilityService.activeService?.refreshKeyFilterState()
+        syncVolumeSuppressionButton()
+        Toast.makeText(context, if (enabled) "已开启音量控制抑制" else "已关闭音量控制抑制", Toast.LENGTH_SHORT).show()
     }
 
     private fun showPracticeOverlay() {
@@ -472,6 +702,25 @@ class OverlayController(
             positionView != null -> "定位好了"
             else -> "定位"
         }
+    }
+
+    private fun refreshCurrentSongUi() {
+        songLabel?.text = currentSongLabel()
+        favoriteButton?.text = if (songLibrary.isFavorite(PlaybackController.songRef)) "取消收藏" else "收藏"
+    }
+
+    private fun syncVolumeSuppressionButton() {
+        volumeSuppressionButton?.text = if (shortcutSettings.isVolumeSuppressionEnabled()) {
+            "音量抑制 开"
+        } else {
+            "音量抑制 关"
+        }
+    }
+
+    private fun currentSongLabel(): String {
+        val current = PlaybackController.song?.name ?: "未选择"
+        val modeLabel = if (resolveSongModeForDisplay() == SongListMode.PLAYLIST) "歌单" else "全部"
+        return "乐谱: $current [$modeLabel]"
     }
 
     override fun onStateChanged(state: String) {
@@ -559,17 +808,15 @@ class OverlayController(
     }
 
     private fun songRow(
-        text: String,
-        enabled: Boolean,
-        index: Int = 0,
-        action: (() -> Unit)? = null
-    ): TextView {
-        return TextView(context).apply {
-            this.text = text
-            textSize = scaledText(15f)
-            setTextColor(if (enabled) Color.WHITE else Color.argb(170, 255, 255, 255))
+        ref: SongRef,
+        index: Int,
+        onToggleFavorite: () -> Unit,
+        action: () -> Unit
+    ): View {
+        val isFavorite = songLibrary.isFavorite(ref)
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(scaledDp(12), 0, scaledDp(12), 0)
             background = rounded(
                 if (index % 2 == 0) Color.argb(54, 255, 255, 255) else Color.argb(34, 255, 255, 255),
                 scaledDp(7).toFloat()
@@ -577,10 +824,43 @@ class OverlayController(
             layoutParams = LinearLayout.LayoutParams(-1, scaledDp(42)).apply {
                 setMargins(0, scaledDp(3), 0, scaledDp(3))
             }
-            if (enabled && action != null) {
+            addView(TextView(context).apply {
+                text = ref.name
+                textSize = scaledText(15f)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(scaledDp(12), 0, scaledDp(12), 0)
                 setOnClickListener { action() }
+            }, LinearLayout.LayoutParams(0, -1, 1f))
+            addView(TextView(context).apply {
+                text = if (isFavorite) "★" else "☆"
+                textSize = scaledText(18f)
+                setTextColor(if (isFavorite) Color.rgb(255, 215, 0) else Color.argb(200, 255, 255, 255))
+                gravity = Gravity.CENTER
+                setPadding(scaledDp(10), 0, scaledDp(10), 0)
+                setOnClickListener { onToggleFavorite() }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, -1))
+        }
+    }
+
+    private fun emptySongRow(text: String): View {
+        return TextView(context).apply {
+            this.text = text
+            textSize = scaledText(14f)
+            setTextColor(Color.argb(190, 255, 255, 255))
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(34, 255, 255, 255), scaledDp(7).toFloat())
+            layoutParams = LinearLayout.LayoutParams(-1, scaledDp(52)).apply {
+                setMargins(0, scaledDp(6), 0, 0)
             }
         }
+    }
+
+    private fun styleModeButton(button: Button, selected: Boolean) {
+        button.background = rounded(
+            if (selected) Color.argb(168, 0, 150, 136) else Color.argb(78, 255, 255, 255),
+            scaledDp(6).toFloat()
+        )
     }
 
     private fun baseParams(focusable: Boolean = false, touchable: Boolean = true): WindowManager.LayoutParams {
@@ -596,13 +876,6 @@ class OverlayController(
         ).apply {
             gravity = Gravity.TOP or Gravity.START
         }
-    }
-
-    private fun loadBundledSongs(): List<String> {
-        return context.assets.list("music")
-            ?.filter { it.endsWith(".txt", ignoreCase = true) }
-            ?.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it })
-            .orEmpty()
     }
 
     private fun rounded(color: Int, radius: Float): GradientDrawable {
@@ -808,6 +1081,8 @@ class OverlayController(
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    controlsAnchorX = params.x
+                    controlsAnchorY = params.y
                     view.performClick()
                     true
                 }
@@ -859,6 +1134,30 @@ class OverlayController(
         }
     }
 
+    private fun songsForMode(mode: SongListMode): List<SongRef> {
+        return songLibrary.songs(mode)
+    }
+
+    private fun resolveSongModeForDisplay(): SongListMode {
+        return if (currentSongMode == SongListMode.PLAYLIST && songLibrary.favoriteCount() == 0) {
+            SongListMode.ALL
+        } else {
+            currentSongMode
+        }
+    }
+
+    private fun preferredSongMode(): SongListMode {
+        return when (uiPrefs.getString(KEY_SONG_MODE, null)) {
+            SongListMode.PLAYLIST.name -> if (songLibrary.favoriteCount() > 0) SongListMode.PLAYLIST else SongListMode.ALL
+            SongListMode.ALL.name -> SongListMode.ALL
+            else -> songLibrary.defaultMode()
+        }
+    }
+
+    private fun saveSongMode(mode: SongListMode) {
+        uiPrefs.edit().putString(KEY_SONG_MODE, mode.name).apply()
+    }
+
     private fun dp(value: Int): Int {
         return (value * context.resources.displayMetrics.density).roundToInt()
     }
@@ -878,4 +1177,8 @@ class OverlayController(
         val x: Int,
         val y: Int
     )
+
+    private companion object {
+        const val KEY_SONG_MODE = "song_mode"
+    }
 }

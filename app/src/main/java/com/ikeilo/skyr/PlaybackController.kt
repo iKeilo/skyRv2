@@ -33,6 +33,7 @@ object PlaybackController {
 
     var listener: Listener? = null
     var song: Song? = null
+    var songRef: SongRef? = null
     var keyPoints: List<PointF> = emptyList()
     var speed: Double = 1.0
     var practiceMode: Boolean = false
