@@ -11,6 +11,8 @@ import android.graphics.PointF
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -48,6 +50,7 @@ class OverlayController(
     private var controls: View? = null
     private var progressView: View? = null
     private var positionView: View? = null
+    private var practiceTouchView: View? = null
     private var practiceLegendView: View? = null
     private var authorView: View? = null
     private var songPickerView: View? = null
@@ -55,6 +58,7 @@ class OverlayController(
     private var controlsParams: WindowManager.LayoutParams? = null
     private var progressParams: WindowManager.LayoutParams? = null
     private var positionParams: WindowManager.LayoutParams? = null
+    private var practiceTouchParams: WindowManager.LayoutParams? = null
     private var practiceLegendParams: WindowManager.LayoutParams? = null
     private var authorParams: WindowManager.LayoutParams? = null
     private var songPickerParams: WindowManager.LayoutParams? = null
@@ -62,6 +66,7 @@ class OverlayController(
     private var pauseButton: Button? = null
     private var endButton: Button? = null
     private var practiceButton: Button? = null
+    private var practiceInputModeButton: Button? = null
     private var positionButton: Button? = null
     private var favoriteButton: Button? = null
     private var volumeSuppressionButton: Button? = null
@@ -78,13 +83,20 @@ class OverlayController(
     private var controlsAnchorY = 80
     private var currentSongMode = preferredSongMode()
     private var currentUiHideMode = preferredUiHideMode()
+    private var currentPracticeInputMode = preferredPracticeInputMode()
+    private var overlaySessionActive = false
     private var uiHidden = false
     private var playbackProgressMs = 0L
     private var playbackTotalMs = 1L
+    private var progressDismissVersion = 0L
+    private var practiceVisualFrozen = false
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val practiceCells = mutableListOf<TextView>()
     private val practicePreviewAnimators = mutableMapOf<Int, ValueAnimator>()
     private val practiceFadeAnimators = mutableMapOf<Int, ValueAnimator>()
+    private val pendingPracticePointers = linkedMapOf<Int, PointF>()
+    private var practiceDispatchRunnable: Runnable? = null
     private val speeds = listOf(0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
     private var speedIndex = 3
     private val uiScaleValues = listOf(0.85f, 1.0f, 1.15f, 1.3f, 1.5f)
@@ -113,6 +125,7 @@ class OverlayController(
             syncVolumeSuppressionButton()
             return
         }
+        overlaySessionActive = true
         controlsAnchorX = x
         controlsAnchorY = y
 
@@ -132,6 +145,7 @@ class OverlayController(
         val play = button("开始") { PlaybackController.start() }
         favoriteButton = button("收藏") { toggleFavoriteCurrentSong() }
         practiceButton = button("跟练关") { togglePracticeMode() }
+        practiceInputModeButton = button("跟练输入") { cyclePracticeInputModeWithToast() }
         pauseButton = button("暂停") { PlaybackController.pauseOrResume() }.apply {
             visibility = View.GONE
         }
@@ -158,9 +172,10 @@ class OverlayController(
             }
         }
         val exit = button("退出") {
+            overlaySessionActive = false
             PlaybackController.stopCurrent()
             removeSongPicker()
-            removeProgressOverlay()
+            dismissProgressOverlay(animated = false)
             removePositionOverlay()
             removeControls()
             uiHidden = false
@@ -171,6 +186,7 @@ class OverlayController(
             play,
             favoriteButton,
             practiceButton,
+            practiceInputModeButton,
             pauseButton,
             end,
             speed,
@@ -252,10 +268,26 @@ class OverlayController(
 
     fun uiHideMode(): UiHideMode = currentUiHideMode
 
+    fun practiceInputMode(): PracticeInputMode = currentPracticeInputMode
+
     fun cycleUiHideMode(): UiHideMode {
         currentUiHideMode = UiHideMode.entries[(UiHideMode.entries.indexOf(currentUiHideMode) + 1) % UiHideMode.entries.size]
         uiPrefs.edit().putString(KEY_UI_HIDE_MODE, currentUiHideMode.storageValue).apply()
         return currentUiHideMode
+    }
+
+    fun cyclePracticeInputMode(): PracticeInputMode {
+        currentPracticeInputMode = PracticeInputMode.entries[
+            (PracticeInputMode.entries.indexOf(currentPracticeInputMode) + 1) % PracticeInputMode.entries.size
+        ]
+        uiPrefs.edit().putString(KEY_PRACTICE_INPUT_MODE, currentPracticeInputMode.storageValue).apply()
+        if (practiceMode && positionOverlayLocked) {
+            removePositionOverlay()
+            showPracticeOverlay()
+        } else {
+            syncModeControls()
+        }
+        return currentPracticeInputMode
     }
 
     override fun onVolumeShortcut(action: VolumeShortcutAction) {
@@ -450,6 +482,10 @@ class OverlayController(
     private fun showProgressOverlay() {
         if (!shouldShowProgressOverlay()) return
         if (progressView != null) {
+            progressDismissVersion += 1
+            progressView?.animate()?.cancel()
+            progressView?.alpha = 1f
+            progressView?.translationY = 0f
             refreshProgressOverlay()
             return
         }
@@ -490,8 +526,10 @@ class OverlayController(
         val params = baseParams(touchable = false).apply {
             this.width = width
             this.height = WindowManager.LayoutParams.WRAP_CONTENT
-            this.x = ((metrics.widthPixels - width) / 2f).roundToInt()
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            this.x = 0
             this.y = scaledDp(14)
+            alpha = PASS_THROUGH_WINDOW_ALPHA
         }
         progressParams = params
         progressView = root
@@ -555,11 +593,15 @@ class OverlayController(
             this.height = bounds.height
             this.x = bounds.x
             this.y = bounds.y
+            if (locked) {
+                alpha = PASS_THROUGH_WINDOW_ALPHA
+            }
         }
         positionParams = params
         windowManager.addView(root, params)
         positionView = root
         if (locked) {
+            syncPracticeTouchLayer(bounds)
             showPracticeLegend(bounds)
         }
         syncModeControls()
@@ -637,6 +679,7 @@ class OverlayController(
     }
 
     private fun removePositionOverlay() {
+        removePracticeTouchLayer()
         positionView?.let { windowManager.removeView(it) }
         removePracticeLegend()
         positionView = null
@@ -666,6 +709,7 @@ class OverlayController(
         pauseButton = null
         endButton = null
         practiceButton = null
+        practiceInputModeButton = null
         positionButton = null
         favoriteButton = null
         volumeSuppressionButton = null
@@ -673,12 +717,34 @@ class OverlayController(
     }
 
     private fun removeProgressOverlay() {
+        progressDismissVersion += 1
+        progressView?.animate()?.cancel()
         progressView?.let { windowManager.removeView(it) }
         progressView = null
         progressParams = null
         progressTitleLabel = null
         progressValueLabel = null
         progressFillView = null
+    }
+
+    private fun dismissProgressOverlay(animated: Boolean) {
+        val view = progressView ?: return
+        val version = ++progressDismissVersion
+        view.animate().cancel()
+        if (!animated) {
+            removeProgressOverlay()
+            return
+        }
+        view.animate()
+            .alpha(0f)
+            .translationY(-scaledDp(10).toFloat())
+            .setDuration(220L)
+            .withEndAction {
+                if (progressView === view && progressDismissVersion == version) {
+                    removeProgressOverlay()
+                }
+            }
+            .start()
     }
 
     private fun removePracticeLegend() {
@@ -760,6 +826,9 @@ class OverlayController(
 
     private fun showPracticeOverlay() {
         if (positionView != null && positionOverlayLocked) return
+        if (currentPracticeInputMode == PracticeInputMode.CAPTURE_FORWARD && !SkyAccessibilityService.isRunning) {
+            Toast.makeText(context, "捕获转发跟练需要开启无障碍服务", Toast.LENGTH_SHORT).show()
+        }
         removePositionOverlay()
         showPositionOverlay(locked = true)
     }
@@ -780,6 +849,7 @@ class OverlayController(
 
     private fun restoreUi() {
         uiHidden = false
+        overlaySessionActive = true
         showControls(controlsAnchorX, controlsAnchorY)
         if (PlaybackController.song != null && shouldShowProgressOverlay()) {
             showProgressOverlay()
@@ -813,6 +883,7 @@ class OverlayController(
 
     private fun syncModeControls() {
         practiceButton?.text = if (practiceMode) "跟练开" else "跟练关"
+        practiceInputModeButton?.text = "跟练输入 ${currentPracticeInputMode.label}"
         positionButton?.text = when {
             practiceMode -> "跟练区域"
             positionView != null -> "定位好了"
@@ -837,6 +908,7 @@ class OverlayController(
     }
 
     private fun shouldShowProgressOverlay(): Boolean {
+        if (!overlaySessionActive) return false
         if (PlaybackController.song == null) return false
         if (!uiHidden) return true
         return currentUiHideMode == UiHideMode.MENU_ONLY
@@ -861,6 +933,8 @@ class OverlayController(
     }
 
     override fun onPlaybackStarted() {
+        practiceVisualFrozen = false
+        clearPracticeHighlights()
         playbackProgressMs = 0L
         playbackTotalMs = totalProgressForCurrentSong()
         if (shouldShowProgressOverlay()) {
@@ -871,10 +945,12 @@ class OverlayController(
     }
 
     override fun onPlaybackPaused() {
+        freezePracticeHighlights()
         syncPlaybackControls()
     }
 
     override fun onPlaybackResumed() {
+        practiceVisualFrozen = false
         syncPlaybackControls()
     }
 
@@ -889,7 +965,9 @@ class OverlayController(
 
     override fun onPlaybackFinished(completed: Boolean) {
         syncPlaybackControls()
+        practiceVisualFrozen = false
         clearPracticeHighlights()
+        clearPendingPracticeTouches()
         if (practiceMode) {
             positionLabel?.apply {
                 text = "跟练模式"
@@ -903,6 +981,7 @@ class OverlayController(
             playbackProgressMs = 0L
         }
         refreshProgressOverlay()
+        dismissProgressOverlay(animated = true)
     }
 
     override fun onPracticeCountdown(seconds: Int) {
@@ -921,6 +1000,7 @@ class OverlayController(
         if (positionView == null || !positionOverlayLocked) {
             showPracticeOverlay()
         }
+        practiceVisualFrozen = false
         positionLabel?.text = ""
         val previewColor = when (kind) {
             PlaybackController.PracticeCueKind.SINGLE -> Color.argb(126, 42, 214, 116)
@@ -936,6 +1016,7 @@ class OverlayController(
         if (positionView == null || !positionOverlayLocked) {
             showPracticeOverlay()
         }
+        practiceVisualFrozen = false
         positionLabel?.text = ""
         practiceCueVersion += 1
         val version = practiceCueVersion
@@ -949,6 +1030,11 @@ class OverlayController(
         val visibleMs = practiceCueVisibleMs(durationMs)
         vibratePracticeCue(kind)
         keys.forEach { key -> showPracticeCell(key, color, visibleMs, version) }
+    }
+
+    private fun cyclePracticeInputModeWithToast() {
+        val mode = cyclePracticeInputMode()
+        Toast.makeText(context, "当前跟练输入: ${mode.label}", Toast.LENGTH_SHORT).show()
     }
 
     private fun button(text: String, action: (View) -> Unit): Button {
@@ -1091,10 +1177,64 @@ class OverlayController(
                 .coerceAtMost(overlayWidth - width - margin)
                 .coerceAtLeast(margin)
             this.y = (bounds.y + (bounds.height - height) / 2).coerceAtLeast(margin)
+            alpha = PASS_THROUGH_WINDOW_ALPHA
         }
         practiceLegendParams = params
         practiceLegendView = view
         windowManager.addView(view, params)
+    }
+
+    private fun syncPracticeTouchLayer(bounds: OverlayBounds) {
+        removePracticeTouchLayer()
+        if (!practiceMode || !positionOverlayLocked || currentPracticeInputMode != PracticeInputMode.CAPTURE_FORWARD) {
+            return
+        }
+        val touchView = View(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            isFocusable = false
+            setOnTouchListener { view, event -> handlePracticeTouch(view, event, bounds) }
+        }
+        val params = baseParams(touchable = true).apply {
+            width = bounds.width
+            height = bounds.height
+            x = bounds.x
+            y = bounds.y
+            alpha = 0f
+        }
+        practiceTouchParams = params
+        practiceTouchView = touchView
+        windowManager.addView(touchView, params)
+    }
+
+    private fun removePracticeTouchLayer() {
+        clearPendingPracticeTouches()
+        practiceTouchView?.let { windowManager.removeView(it) }
+        practiceTouchView = null
+        practiceTouchParams = null
+    }
+
+    private fun freezePracticeHighlights() {
+        if (!practiceMode) return
+        practiceVisualFrozen = true
+        practiceCueVersion += 1
+        practicePreviewAnimators.values.toList().forEach { it.cancel() }
+        practicePreviewAnimators.clear()
+        practiceFadeAnimators.values.toList().forEach { it.cancel() }
+        practiceFadeAnimators.clear()
+    }
+
+    private fun setPracticeTouchLayerTouchable(touchable: Boolean) {
+        val view = practiceTouchView ?: return
+        val params = practiceTouchParams ?: return
+        val updatedFlags = if (touchable) {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        if (updatedFlags == params.flags) return
+        params.flags = updatedFlags
+        windowManager.updateViewLayout(view, params)
     }
 
     private fun showAuthorWatermark() {
@@ -1116,6 +1256,7 @@ class OverlayController(
             this.height = height
             this.x = (metrics.widthPixels - width - margin).coerceAtLeast(margin)
             this.y = (metrics.heightPixels - height - margin).coerceAtLeast(margin)
+            alpha = PASS_THROUGH_WINDOW_ALPHA
         }
         authorParams = params
         authorView = view
@@ -1165,12 +1306,16 @@ class OverlayController(
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
                     practicePreviewAnimators.remove(key)
-                    resetPracticeCell(cell)
+                    if (!practiceVisualFrozen) {
+                        resetPracticeCell(cell)
+                    }
                 }
 
                 override fun onAnimationCancel(animation: Animator) {
                     practicePreviewAnimators.remove(key)
-                    resetPracticeCell(cell)
+                    if (!practiceVisualFrozen) {
+                        resetPracticeCell(cell)
+                    }
                 }
             })
         }
@@ -1189,7 +1334,7 @@ class OverlayController(
         val targetColor = defaultPracticeCellColor()
         val argb = ArgbEvaluator()
         cell.postDelayed({
-            if (practiceCueVersion != version) return@postDelayed
+            if (practiceCueVersion != version || practiceVisualFrozen) return@postDelayed
             val animator = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = fadeMs
                 addUpdateListener { animation ->
@@ -1208,6 +1353,85 @@ class OverlayController(
             practiceFadeAnimators[key] = animator
             animator.start()
         }, holdMs)
+    }
+
+    private fun handlePracticeTouch(view: View, event: MotionEvent, bounds: OverlayBounds): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                collectPracticePointer(view, event, event.actionIndex, bounds)
+                schedulePracticeDispatch()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                for (index in 0 until event.pointerCount) {
+                    updatePracticePointer(view, event, index, bounds)
+                }
+            }
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP -> {
+                updatePracticePointer(view, event, event.actionIndex, bounds)
+            }
+            MotionEvent.ACTION_CANCEL -> clearPendingPracticeTouches()
+        }
+        return true
+    }
+
+    private fun collectPracticePointer(view: View, event: MotionEvent, pointerIndex: Int, bounds: OverlayBounds) {
+        val rawPoint = rawPoint(view, event, pointerIndex)
+        if (keyAt(rawPoint.x, rawPoint.y, bounds) == null) return
+        pendingPracticePointers[event.getPointerId(pointerIndex)] = rawPoint
+    }
+
+    private fun updatePracticePointer(view: View, event: MotionEvent, pointerIndex: Int, bounds: OverlayBounds) {
+        val pointerId = event.getPointerId(pointerIndex)
+        if (!pendingPracticePointers.containsKey(pointerId)) return
+        val rawPoint = rawPoint(view, event, pointerIndex)
+        if (keyAt(rawPoint.x, rawPoint.y, bounds) == null) {
+            pendingPracticePointers.remove(pointerId)
+        } else {
+            pendingPracticePointers[pointerId] = rawPoint
+        }
+    }
+
+    private fun schedulePracticeDispatch() {
+        if (practiceDispatchRunnable != null) return
+        val runnable = Runnable {
+            practiceDispatchRunnable = null
+            dispatchPracticeTouches()
+        }
+        practiceDispatchRunnable = runnable
+        mainHandler.postDelayed(runnable, PRACTICE_CHORD_WINDOW_MS)
+    }
+
+    private fun dispatchPracticeTouches() {
+        val points = pendingPracticePointers.values.toList()
+        pendingPracticePointers.clear()
+        if (points.isEmpty()) return
+        val service = SkyAccessibilityService.activeService
+        if (service == null) {
+            Toast.makeText(context, "无障碍服务未启动，无法转发按键", Toast.LENGTH_SHORT).show()
+            return
+        }
+        setPracticeTouchLayerTouchable(false)
+        val dispatched = service.tap(points, durationMs = PRACTICE_TAP_DURATION_MS) {
+            practiceTouchView?.post {
+                if (positionOverlayLocked && currentPracticeInputMode == PracticeInputMode.CAPTURE_FORWARD) {
+                    setPracticeTouchLayerTouchable(true)
+                }
+            }
+        }
+        if (!dispatched) {
+            setPracticeTouchLayerTouchable(true)
+        }
+    }
+
+    private fun clearPendingPracticeTouches() {
+        practiceDispatchRunnable?.let(mainHandler::removeCallbacks)
+        practiceDispatchRunnable = null
+        pendingPracticePointers.clear()
+        if (currentPracticeInputMode == PracticeInputMode.CAPTURE_FORWARD) {
+            setPracticeTouchLayerTouchable(true)
+        }
     }
 
     private fun practiceCueVisibleMs(durationMs: Long): Long {
@@ -1275,6 +1499,21 @@ class OverlayController(
             x = (minX - cellW / 2f).roundToInt(),
             y = (minY - cellH / 2f).roundToInt()
         )
+    }
+
+    private fun rawPoint(view: View, event: MotionEvent, pointerIndex: Int): PointF {
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return PointF(location[0] + event.getX(pointerIndex), location[1] + event.getY(pointerIndex))
+    }
+
+    private fun keyAt(rawX: Float, rawY: Float, bounds: OverlayBounds): Int? {
+        if (rawX < bounds.x || rawY < bounds.y || rawX > bounds.x + bounds.width || rawY > bounds.y + bounds.height) {
+            return null
+        }
+        val col = (((rawX - bounds.x) / bounds.width) * 5f).toInt().coerceIn(0, 4)
+        val row = (((rawY - bounds.y) / bounds.height) * 3f).toInt().coerceIn(0, 2)
+        return row * 5 + col
     }
 
     private fun makeDraggable(view: View, paramsProvider: () -> WindowManager.LayoutParams?) {
@@ -1376,6 +1615,10 @@ class OverlayController(
         return UiHideMode.fromStorage(uiPrefs.getString(KEY_UI_HIDE_MODE, null))
     }
 
+    private fun preferredPracticeInputMode(): PracticeInputMode {
+        return PracticeInputMode.fromStorage(uiPrefs.getString(KEY_PRACTICE_INPUT_MODE, null))
+    }
+
     private fun saveSongMode(mode: SongListMode) {
         uiPrefs.edit().putString(KEY_SONG_MODE, mode.name).apply()
     }
@@ -1416,6 +1659,10 @@ class OverlayController(
     private companion object {
         const val KEY_SONG_MODE = "song_mode"
         const val KEY_UI_HIDE_MODE = "ui_hide_mode"
+        const val KEY_PRACTICE_INPUT_MODE = "practice_input_mode"
         const val KEY_UI_SIZE_INDEX = "uiSizeIndex"
+        const val PRACTICE_CHORD_WINDOW_MS = 16L
+        const val PRACTICE_TAP_DURATION_MS = 40L
+        const val PASS_THROUGH_WINDOW_ALPHA = 0.6f
     }
 }

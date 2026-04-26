@@ -35,6 +35,17 @@ enum class UiHideMode(val storageValue: String, val label: String) {
     }
 }
 
+enum class PracticeInputMode(val storageValue: String, val label: String) {
+    PURE_PASSTHROUGH("pure_passthrough", "纯透传"),
+    CAPTURE_FORWARD("capture_forward", "捕获转发");
+
+    companion object {
+        fun fromStorage(value: String?): PracticeInputMode {
+            return entries.firstOrNull { it.storageValue == value } ?: PURE_PASSTHROUGH
+        }
+    }
+}
+
 data class SongRef(
     val id: String,
     val name: String,

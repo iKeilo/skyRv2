@@ -23,6 +23,7 @@ class MainActivity : Activity() {
     private lateinit var favoriteButton: Button
     private lateinit var suppressionButton: Button
     private lateinit var uiModeButton: Button
+    private lateinit var practiceInputModeButton: Button
     private val shortcutSpinners = linkedMapOf<VolumeShortcutTrigger, Spinner>()
     private val shortcutActions = VolumeShortcutAction.entries.filter { it != VolumeShortcutAction.START_OR_RESTART }
 
@@ -75,6 +76,11 @@ class MainActivity : Activity() {
             updateStatus()
             Toast.makeText(this, "当前UI模式: ${mode.label}", Toast.LENGTH_SHORT).show()
         }
+        practiceInputModeButton = button("跟练输入") {
+            val mode = overlayController.cyclePracticeInputMode()
+            updateStatus()
+            Toast.makeText(this, "当前跟练输入: ${mode.label}", Toast.LENGTH_SHORT).show()
+        }
 
         content.addView(status)
         content.addView(button("选择乐谱") { pickSong() })
@@ -84,6 +90,7 @@ class MainActivity : Activity() {
         content.addView(button("显示悬浮控制") { overlayController.showControls() })
         content.addView(suppressionButton)
         content.addView(uiModeButton)
+        content.addView(practiceInputModeButton)
         content.addView(sectionTitle("音量快捷键"))
         content.addView(sectionHint("开启音量控制抑制后生效。选择下拉项后，点击保存按钮才会写入当前配置。"))
 
@@ -183,6 +190,7 @@ class MainActivity : Activity() {
         val favorite = if (overlayController.isCurrentSongFavorite()) "已收藏" else "未收藏"
         val suppression = if (overlayController.isVolumeSuppressionEnabled()) "开启" else "关闭"
         val uiMode = overlayController.uiHideMode().label
+        val practiceInputMode = overlayController.practiceInputMode().label
         status.text = buildString {
             append("乐谱: ").append(song)
             append("\n悬浮窗: ").append(overlay)
@@ -191,10 +199,12 @@ class MainActivity : Activity() {
             append("\n当前收藏: ").append(favorite)
             append("\n音量抑制: ").append(suppression)
             append("\nUI模式: ").append(uiMode)
+            append("\n跟练输入: ").append(practiceInputMode)
         }
         favoriteButton.text = if (overlayController.isCurrentSongFavorite()) "取消收藏当前乐谱" else "收藏当前乐谱"
         suppressionButton.text = "音量抑制: $suppression"
         uiModeButton.text = "UI模式: $uiMode"
+        practiceInputModeButton.text = "跟练输入: $practiceInputMode"
         shortcutSpinners.forEach { (trigger, spinner) ->
             val action = overlayController.shortcutAction(trigger)
             spinner.setSelection(shortcutActions.indexOf(action).coerceAtLeast(0), false)

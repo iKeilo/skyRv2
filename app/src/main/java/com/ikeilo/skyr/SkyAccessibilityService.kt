@@ -44,15 +44,16 @@ class SkyAccessibilityService : AccessibilityService() {
         serviceInfo = updated
     }
 
-    fun tap(points: List<PointF>, onFinished: (() -> Unit)? = null): Boolean {
+    fun tap(points: List<PointF>, durationMs: Long = 60L, onFinished: (() -> Unit)? = null): Boolean {
         if (points.isEmpty()) return false
         val builder = GestureDescription.Builder()
+        val strokeDurationMs = durationMs.coerceIn(1L, 200L)
         points.forEach { point ->
             val path = Path().apply {
                 moveTo(point.x, point.y)
                 lineTo(point.x + 0.1f, point.y + 0.1f)
             }
-            builder.addStroke(GestureDescription.StrokeDescription(path, 0L, 60L))
+            builder.addStroke(GestureDescription.StrokeDescription(path, 0L, strokeDurationMs))
         }
         val callback = if (onFinished == null) {
             null
